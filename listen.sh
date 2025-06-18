@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Launch a forking socat listener for ZFS replication.
 # All stderr (socat and its children) is consumed by systemd and ends in the journal.
 
