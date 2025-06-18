@@ -1,0 +1,17 @@
+[Unit]
+Description=ZFS replication listener
+After=network-online.target zfs.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/etc/zfsrecvd/listen.sh
+Restart=on-failure
+RestartSec=2s
+StandardError=journal
+
+# Needs root for zfs recv; can be made safer by setting up a dedicated user
+User=root
+
+[Install]
+WantedBy=multi-user.target

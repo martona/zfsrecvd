@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Parse /etc/zfsrecvd/zfsrecvd.conf and leave:
+#   * recv_root   (string)
+#   * tcp_port    (string)
+#   * allowed_hosts (bash array)
+set -euo pipefail
+
+CFG="/etc/zfsrecvd/zfsrecvd.conf"
+
+recv_root="" tcp_port="" allowed_hosts=()
+current=""
+
+while IFS= read -r line || [[ -n "$line" ]]; do
+    line=${line%%#*}               # strip comments
+    line=${line//$'\r'/}           # strip CR
+    [[ -z "$line" ]] && continue   # skip blanks
+    if [[ $line =~ ^\[(.*)\]$ ]]; then
+        current="${BASH_REMATCH[1]}"
+        continue
+    fi
+    case "$current" in
+        recv-root)     recv_root="$line" ;;
+        tcp-port)      tcp_port="$line"  ;;
+        allowed_hosts) allowed_hosts+=( "$line" ) ;;
+    esac
+done < "$CFG"
+
+if [[ -z "$recv_root" ]]; then recv_root="ebs/recv"; fi
+if [[ -z "$tcp_port"  ]]; then tcp_port=5299;        fi
