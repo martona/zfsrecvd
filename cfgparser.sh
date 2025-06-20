@@ -7,7 +7,7 @@ set -euo pipefail
 
 CFG="/etc/zfsrecvd/zfsrecvd.conf"
 
-recv_root="" tcp_port="" allowed_hosts=()
+recv_root="" tcp_port="" tcp_addr="" allowed_hosts=()
 current=""
 
 while IFS= read -r line || [[ -n "$line" ]]; do
@@ -21,9 +21,13 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     case "$current" in
         recv-root)     recv_root="$line" ;;
         tcp-port)      tcp_port="$line"  ;;
+        tcp-addr)      tcp_addr="$line"  ;;
         allowed_hosts) allowed_hosts+=( "$line" ) ;;
     esac
 done < "$CFG"
 
+tcp_addr=$(getent ahosts "$tcp_addr" | awk '{print $1; exit}') || true
+
 if [[ -z "$recv_root" ]]; then recv_root="ebs/recv"; fi
 if [[ -z "$tcp_port"  ]]; then tcp_port=5299;        fi
+if [[ -z "$tcp_addr"  ]]; then tcp_addr="127.0.0.1"; fi

@@ -53,7 +53,7 @@ zfs list -H "$dest_base" >/dev/null 2>&1 || zfs create -o mountpoint=none "$dest
 zfs create -p "$dest_parent" 2>/dev/null || true
 
 #
-# ---- 3½. send snapshot list back to client ---------------------------------
+# ---- 4. send snapshot list back to client ---------------------------------
 #
 # List any existing snapshots for the exact dataset path that will be updated.
 # Respond with this to client, followed by an empty line as the delimiter.
@@ -65,6 +65,7 @@ echo
 # incremental send. Our `zfs recv` will handle both cases.
 
 #
-# ---- 4. hand stream off to ZFS ----------------------------------------------
+# ---- 5. hand stream off to ZFS ----------------------------------------------
 #
 exec /sbin/zfs recv -u -F -e "$dest_parent"
+echo "Successfully completed: $dataset_with_snap" >&2
