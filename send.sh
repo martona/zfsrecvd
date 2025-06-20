@@ -49,7 +49,8 @@ OPENSSL:"${remote}":"$tcp_port",\
 cert=/etc/zfsrecvd/client.pem,\
 key=/etc/zfsrecvd/client.key,\
 cafile=/etc/zfsrecvd/ca.pem,\
-verify=1
+verify=1 \
+2> >(grep -v "OpenSSL: Warning: this implementation does not check CRLs" >&2)
 }
 
 exec {OUT}>&"${NET[1]}"   # write‑end to server
@@ -100,8 +101,7 @@ done
 if [[ -n "$common" ]]; then
     echo "Sending incremental from $common to $snapname" >&2
     # determine size of the incremental send
-    size=$( zfs send -nP -Rwi "${dataset}@${common}" "${full_snap}" 2>&1 |
-        awk '/^size/{print $2;exit}' )
+    size=$( zfs send -nP -Rwi "${dataset}@${common}" "${full_snap}" | awk '/^size/{print $2;exit}' )
     # Incremental: -R (replicate), -w (raw), -i FROM@ TO@
     zfs send -Rwi "${dataset}@${common}" "${full_snap}" | pv ${size:+-s "$size"} >&${OUT}
 else

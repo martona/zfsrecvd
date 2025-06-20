@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # Parse /etc/zfsrecvd/zfsrecvd.conf and leave:
-#   * recv_root   (string)
-#   * tcp_port    (string)
+#   * recv_root     (string)
+#   * tcp_port      (string)
 #   * allowed_hosts (bash array)
+#   * sends         (bash array)
+
 set -euo pipefail
+source /etc/zfsrecvd/cfgparser.sh
 
 CFG="/etc/zfsrecvd/zfsrecvd.conf"
 
-recv_root="" tcp_port="" tcp_addr="" allowed_hosts=()
+recv_root="" tcp_port="" tcp_addr="" allowed_hosts=() sends=()
 current=""
 
 while IFS= read -r line || [[ -n "$line" ]]; do
@@ -23,6 +26,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
         tcp-port)      tcp_port="$line"  ;;
         tcp-addr)      tcp_addr="$line"  ;;
         allowed_hosts) allowed_hosts+=( "$line" ) ;;
+        sends)         sends+=( "$line" ) ;;
     esac
 done < "$CFG"
 
