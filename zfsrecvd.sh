@@ -67,5 +67,5 @@ echo
 #
 # ---- 5. hand stream off to ZFS ----------------------------------------------
 #
-exec /sbin/zfs recv -u -F -e "$dest_parent"
+/sbin/zfs recv -u -F -e "$dest_parent"
 echo "Successfully completed: $dataset_with_snap" >&2

@@ -10,8 +10,8 @@ set -euo pipefail
 CFG="/etc/zfsrecvd/zfsrecvd.conf"
 
 recv_root="" tcp_port="" tcp_addr="" allowed_hosts=() sends=()
-current=""
 
+current=""
 while IFS= read -r line || [[ -n "$line" ]]; do
     line=${line%%#*}               # strip comments
     line=${line//$'\r'/}           # strip CR
@@ -29,7 +29,18 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     esac
 done < "$CFG"
 
-tcp_addr=$(getent ahosts "$tcp_addr" | awk '{print $1; exit}') || true
+# resolve the address if needed.
+# early in the boot we might not have a DNS server yet,
+# or tailscale might not yet be up. we retry a few times 
+# to make the address resolvable if possible. 
+max_tries=5
+name_or_ip="$tcp_addr"
+for ((try=1; try<=max_tries; try++)); do
+    tcp_addr=$(getent ahosts "$name_or_ip" | awk '{print $1; exit}') || true
+    [[ -n $tcp_addr ]] && break          # success, quit loop
+    echo "wait-net: [$name_or_ip] not yet resolvable (attempt $try/$max_tries)" >&2
+    sleep 5
+done
 
 if [[ -z "$recv_root" ]]; then recv_root="ebs/recv"; fi
 if [[ -z "$tcp_port"  ]]; then tcp_port=5299;        fi
