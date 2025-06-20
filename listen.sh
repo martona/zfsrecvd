@@ -14,4 +14,4 @@ key=/etc/zfsrecvd/server.key,\
 cafile=/etc/zfsrecvd/ca.pem,\
 verify=1 \
 EXEC:'/etc/zfsrecvd/zfsrecvd.sh' \
-2> >(grep -v "OpenSSL: Warning: this implementation does not check CRLs" >&2)
+2> >(grep --line-buffered -v "OpenSSL: Warning: this implementation does not check CRLs" >&2)
