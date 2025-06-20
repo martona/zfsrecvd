@@ -6,7 +6,6 @@
 #   * sends         (bash array)
 
 set -euo pipefail
-source /etc/zfsrecvd/cfgparser.sh
 
 CFG="/etc/zfsrecvd/zfsrecvd.conf"
 
