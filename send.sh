@@ -64,10 +64,19 @@ printf 'zfsrecvd1.0\n%s\n' "${full_snap}" >&${OUT}
 #
 # ---------- 4.  receive remote snapshot list --------------------------------
 #
-declare -a remote_snaps
-while IFS= read -r line <&${IN}; do
-    [[ -z "$line" ]] && break            # blank line = end of list
-    remote_snaps+=( "${line#*@}" )       # keep only the part after '@'
+remote_snaps=()
+while true; do
+    if IFS= read -r -u "${IN}" line; then
+        if [[ -z $line ]]; then          # blank line => list finished
+            break
+        fi
+        remote_snaps+=( "${line#*@}" )
+    else
+        rc=$?                             # non‑zero status (1 = EOF, >1 = error)
+        echo "ERROR: lost connection while pulling snapshot list (read rc=$rc)" >&2
+        wait "${NET_PID}"                 # reap socat
+        exit $rc                          # propagate error
+    fi
 done
 
 #
