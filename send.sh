@@ -80,6 +80,20 @@ while true; do
 done
 
 #
+# ---------- 4b.  short‑circuit if snapshot already present -------------------
+#
+for rs in "${remote_snaps[@]}"; do
+    if [[ "$rs" == */"$full_snap" ]]; then
+        echo "Snapshot [$full_snap] is already on [${remote}]; nothing to do." >&2
+        # close our side of the pipe cleanly so the server isn’t left hanging
+        exec {OUT}>&-
+        exec {NET[1]}>&-
+        wait "${NET_PID}"
+        exit 0
+    fi
+done
+
+#
 # ---------- 5.  build list of local snaps older than target ------------------
 #
 mapfile -t local_all < <(
