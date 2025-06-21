@@ -121,6 +121,23 @@ else
 fi
 echo "Send successful." >&2
 
+# read the response from the server. (ends with an empty line)
+# we don't actually care what's in there - just making sure we don't
+# close the FDs prematurely and prevent proper log output on the other side.
+
+while true; do
+    if IFS= read -r -u "${IN}" line; then
+        if [[ -z $line ]]; then          # blank line => list finished
+            break
+        fi
+    else
+        rc=$?                             # non‑zero status (1 = EOF, >1 = error)
+        echo "ERROR: lost connection while confirming completion"
+        wait "${NET_PID}"                 # reap socat
+        exit $rc                          # propagate error
+    fi
+done
+
 #
 # ---------- 8.  tidy up ------------------------------------------------------
 #

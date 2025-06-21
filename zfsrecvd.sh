@@ -69,3 +69,4 @@ echo
 #
 /sbin/zfs recv -s -u -F -e "$dest_parent"
 echo "Successfully completed: $dataset_with_snap" >&2
+printf 'done\n\n'
