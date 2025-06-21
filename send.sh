@@ -67,13 +67,21 @@ printf 'zfsrecvd1.0\n%s\n' "${full_snap}" >&${OUT}
 remote_snaps=()
 while true; do
     if IFS= read -r -u "${IN}" line; then
-        if [[ -z $line ]]; then          # blank line => list finished
+        if [[ -z $line ]]; then                  # blank line => list finished
             break
         fi
         if [[ "$line" == "TOKEN: "* ]]; then
             # we don't handle these yet
-            echo "Received token: $line" >&2  # debug output
-            continue                          # skip this line
+            echo "Received token: $line" >&2
+            continue                            # skip this line
+        fi
+        if [[ "$line" == */"$full_snap" ]]; then
+            echo "Snapshot [$full_snap] is already on [${remote}]; nothing to do." >&2
+            # close our side of the pipe cleanly so the server isn’t left hanging
+            exec {OUT}>&-
+            exec {NET[1]}>&-
+            wait "${NET_PID}"
+            exit 0
         fi
         remote_snaps+=( "${line#*@}" )
     else
@@ -81,20 +89,6 @@ while true; do
         echo "ERROR: lost connection while pulling snapshot list (read rc=$rc)" >&2
         wait "${NET_PID}"                 # reap socat
         exit $rc                          # propagate error
-    fi
-done
-
-#
-# ---------- 4b.  short‑circuit if snapshot already present -------------------
-#
-for rs in "${remote_snaps[@]}"; do
-    if [[ "$rs" == */"$full_snap" ]]; then
-        echo "Snapshot [$full_snap] is already on [${remote}]; nothing to do." >&2
-        # close our side of the pipe cleanly so the server isn’t left hanging
-        exec {OUT}>&-
-        exec {NET[1]}>&-
-        wait "${NET_PID}"
-        exit 0
     fi
 done
 
