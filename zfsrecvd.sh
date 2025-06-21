@@ -45,20 +45,23 @@ dest_base="${recv_root}/${safe_cn}"
 dest_parent="$dest_base"
 [[ -n "$parent" ]] && dest_parent="${dest_base}/${parent}"
 
-# if hostname wasn't seen before, create its dataset without a mountpoint
+# If hostname wasn't seen before, create its root dataset without a mountpoint.
 zfs list -H "$dest_base" >/dev/null 2>&1 || zfs create -o mountpoint=none "$dest_base"
 
-# create full path if doesn't exist (-o ignored here by zfs)
-# ignore errors here, e.g. if path already exists
+# Create full path for recv target if doesn't exist (-o ignored with -p by zfs,
+# which is why we had to do the above step separately).
+# Ignore errors here, e.g. if path already exists.
 zfs create -p "$dest_parent" 2>/dev/null || true
 
 #
 # ---- 4. send snapshot list back to client ---------------------------------
 #
 # List any existing snapshots for the exact dataset path that will be updated.
-# Respond with this to client, followed by an empty line as the delimiter.
-# Again we ignore errors in case the dataset doesn't exist here or has no snapshots.
+# Respond with this to client.
 zfs list -H -o name -t snapshot "${dest_base}/${dataset}" 2>/dev/null || true
+# Append any resume tokens if available in the subtree.
+zfs get -H -o name,value receive_resume_token -r "${dest_base}/${dataset}" | awk 'NF==2 && $2!="-" {printf "TOKEN: %s=%s\n", $1, $2}' || true
+# Complete the list with a single empty line.
 echo
 
 # Client will process this list and decide whether to send a full or 

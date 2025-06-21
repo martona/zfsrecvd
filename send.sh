@@ -70,6 +70,11 @@ while true; do
         if [[ -z $line ]]; then          # blank line => list finished
             break
         fi
+        if [[ "$line" == "TOKEN: "* ]]; then
+            # we don't handle these yet
+            echo "Received token: $line" >&2  # debug output
+            continue                          # skip this line
+        fi
         remote_snaps+=( "${line#*@}" )
     else
         rc=$?                             # non‑zero status (1 = EOF, >1 = error)
