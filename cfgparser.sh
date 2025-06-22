@@ -6,7 +6,6 @@
 #   * sends         (bash array)
 
 CFG="/etc/zfsrecvd/zfsrecvd.conf"
-MAGIC_RESUME_SUCCESS_RC=219
 
 recv_root="" tcp_port="" tcp_addr="" allowed_hosts=() sends=() orchestrator=()
 

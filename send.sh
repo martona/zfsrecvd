@@ -16,13 +16,15 @@ source /etc/zfsrecvd/cfgparser.sh
 #
 # ---------- 0.  arguments ----------------------------------------------------
 #
-if [[ $# -ne 2 ]]; then
-    echo "Usage: $0 <snapshot> <remote_host>" >&2
+if [[ $# -lt 2 || $# -gt 3 ]]; then
+    echo "Usage: $0 <snapshot> <remote_host>  [sentinel_tmpfile]" >&2
     exit 64
 fi
 
 full_snap="$1"           # tank/ds@snap
 remote="$2"              # DNS name or IP of zfsrecvd listener
+sentinel_file="${3:-}"  # /tmp/send-resume-status.xxxxxx  (optional)
+
 exit_script() {
     local exit_code="$1"
     exec {OUT}>&-      || true    # close our duplicate
@@ -48,6 +50,11 @@ finalize_and_exit() {
         fi
     done
     exit_script "$exit_code"
+}
+
+mark_resume_ok() {
+    [[ -n $sentinel_file ]] || return 0
+    printf 'RESUME_OK\n' >| "$sentinel_file" 2>/dev/null || true
 }
 
 #
@@ -131,7 +138,8 @@ if [[ -n "$resume_token" ]]; then
     echo "Size of resume stream: $size" >&2
     if zfs send -t $token_part | pv "$PV_FORCE_FLAG" ${size:+-s "$size"} >&${OUT}; then
         echo "Resume successful." >&2
-        finalize_and_exit $MAGIC_RESUME_SUCCESS_RC
+        mark_resume_ok 
+        finalize_and_exit 0
     else
         rc=$?
         echo "ERROR: resume failed with rc=$rc" >&2

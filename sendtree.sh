@@ -33,6 +33,9 @@ else
     dataset="$full_snap"          # tank/ds
 fi
 
+sentinel=$(mktemp)
+: >"${sentinel}"
+
 #
 # ---------- 1.  walk list, send each entry -----------------------------------
 #
@@ -40,14 +43,30 @@ while read -r ds; do
     retry=0
     max_retries=5
     while [[ $retry -lt $max_retries ]]; do
+        ((retry++))
         echo "Sending [$ds$snapname] to [$remote]" >&2
         if [[ $retry -gt 0 ]]; then
             sleep 5
-            echo "    Retrying [$ds$snapname] to [$remote] (attempt $((retry + 1)))" >&2
+            echo "    Retrying [$ds$snapname] to [$remote] (attempt $retry/$max_retries)" >&2
         fi
-        if run_indented "        [send] " /etc/zfsrecvd/send.sh "$ds$snapname" "$remote"; then
+        set +e
+        run_indented "        [send] " /etc/zfsrecvd/send.sh "$ds$snapname" "$remote"
+        rc=$?
+        set -e
+        if [[ $rc -eq 0 ]]; then
+            if [[ $(head -n1 "$sentinel") == "RESUME_OK" ]]; then
+                # we just resumed a previous fail; we should retry the current operation
+                # to make sure the dataset is where it needs to be. the resume token
+                # could have been from a while ago.
+                continue
+            fi
             break
         fi
-        ((retry++))
     done
 done < <(zfs list -r -H -o name -t filesystem,volume "$dataset")
+
+#
+# ---------- 2.  cleanup ------------------------------------------------------
+#
+
+rm -f -- "$sentinel"
