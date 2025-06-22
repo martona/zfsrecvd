@@ -173,13 +173,13 @@ done
 # ---------- 9.  ship the stream ---------------------------------------------
 #
 if [[ -n "$common" ]]; then
-    echo "Sending incremental from $common to $snapname" >&2
+    echo "Sending incremental from [${$dataset}@${common}] to [${full_snap}]" >&2
     # determine size of the incremental send
     size=$( zfs send -nP -Rwi "${dataset}@${common}" "${full_snap}" | awk '/^size/{print $2;exit}' )
     # Incremental: -R (replicate), -w (raw), -i FROM@ TO@
     zfs send -Rwi "${dataset}@${common}" "${full_snap}" | pv ${size:+-s "$size"} >&${OUT}
 else
-    echo "No common snapshot; full send" >&2
+    echo "No common snapshot; full send: [${full_snap}]" >&2
     # determine size
     size=$( zfs send -nP -Rw "${full_snap}" 2>&1 | awk '/^size/{print $2;exit}' )
     zfs send -Rw "${full_snap}" | pv ${size:+-s "$size"} >&${OUT}
