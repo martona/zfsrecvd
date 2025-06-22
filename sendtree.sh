@@ -45,12 +45,12 @@ while read -r ds; do
     while [[ $retry -lt $max_retries ]]; do
         ((++retry))
         echo "Sending [$ds$snapname] to [$remote]" >&2
-        if [[ $retry -gt 0 ]]; then
+        if [[ $retry -gt 1 ]]; then
             sleep 5
             echo "    Retrying [$ds$snapname] to [$remote] (attempt $retry/$max_retries)" >&2
         fi
         set +e
-        run_indented "        [send] " /etc/zfsrecvd/send.sh "$ds$snapname" "$remote"
+        run_indented "        [send] " /etc/zfsrecvd/send.sh "$ds$snapname" "$remote" "$sentinel"
         rc=$?
         set -e
         if [[ $rc -eq 0 ]]; then

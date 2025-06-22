@@ -18,12 +18,12 @@ source /etc/zfsrecvd/cfgparser.sh
 #
 if [[ $# -lt 2 || $# -gt 3 ]]; then
     echo "Usage: $0 <snapshot> <remote_host>  [sentinel_tmpfile]" >&2
-    exit 64
+    exit 1
 fi
 
 full_snap="$1"           # tank/ds@snap
 remote="$2"              # DNS name or IP of zfsrecvd listener
-sentinel_file="${3:-}"  # /tmp/send-resume-status.xxxxxx  (optional)
+sentinel_file="${3:-}"   # /tmp/send-resume-status.xxxxxx  (optional)
 
 exit_script() {
     local exit_code="$1"
