@@ -31,7 +31,7 @@ while true; do
     if [[ -z $line ]]; then                # blank line => list finished
         break
     fi
-    lines+=( "${line#*@}" )
+    lines+=( "$line" )
 done
 if [[ ${#lines[@]} -lt 2 ]]; then
     echo "ERROR: expected at least 2 lines header" >&2
