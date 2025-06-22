@@ -68,8 +68,9 @@ if [[ -n "$token_ds" ]]; then
     # tell client that we've found a token; we expect it to resume from it.
     echo "TOKEN: $token_ds=$token_val"
     echo
+    echo "Resuming dataset: [${token_ds}]" >&2
     zfs recv "$token_ds"
-    echo "Successfully resumed: $token_ds" >&2
+    echo "Successfully resumed & completed [${token_ds}]" >&2
     echo DONE
     echo
     exit 0
@@ -90,17 +91,12 @@ zfs create -p "$dest_parent" 2>/dev/null || true
 #
 # ---- 4. send snapshot list back to client ---------------------------------
 #
-# List any existing snapshots and resume tokens for the exact dataset path.
+# List any existing snapshots for the exact dataset path.
 # Respond with this to client.
 echo "Listing existing snapshots for: ${dest_base}/$dataset" >&2
 zfs list -H -o name -t snapshot "${dest_base}/${dataset}" 2>/dev/null | awk 'NF==1 {printf "SNAPSHOT: %s\n", $1}' | tee /dev/stderr || true
-echo "Listing resume tokens for: ${dest_base}/${dataset}" >&2
-zfs get -H -o name,value receive_resume_token -r "${dest_base}/${dataset}" 2>/dev/null | awk 'NF==2 && $2!="-" {printf "TOKEN: %s=%s\n", $1, $2}' | tee /dev/stderr || true
 # Complete the list with a single empty line.
 echo
-
-# Client will process this list and decide whether to send a full or 
-# incremental send. One `zfs recv` will handle both cases.
 
 #
 # ---- 5. hand stream off to ZFS ----------------------------------------------
