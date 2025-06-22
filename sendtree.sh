@@ -48,11 +48,6 @@ while read -r ds; do
         if /etc/zfsrecvd/send.sh "$ds$snapname" "$remote"; then
             break
         fi
-        rc=$?
-        if [[ $rc -eq $MAGIC_RESUME_SUCCESS_RC ]]; then
-            # not actually doing anything special here yet,
-            # just fall through into a retry which makes sense for this part anyway
-        fi
         ((retry++))
     done
 done < <(zfs list -r -H -o name -t filesystem,volume "$dataset")
