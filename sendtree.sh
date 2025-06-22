@@ -58,6 +58,7 @@ while read -r ds; do
                 # we just resumed a previous fail; we should retry the current operation
                 # to make sure the dataset is where it needs to be. the resume token
                 # could have been from a while ago.
+                : >"${sentinel}"
                 continue
             fi
             break
