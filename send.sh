@@ -3,6 +3,8 @@
 #
 # Example: send.sh tank/outer/inner/actual@snap2025-06-18   backup‑box
 #
+# Send a single ZFS snapshot to a remote host. Non-recursive.
+#
 # Requires:
 #   * /etc/zfsrecvd/{client.pem,client.key,ca.pem}
 #   * socat with OpenSSL support
@@ -128,7 +130,7 @@ if [[ -n "$resume_token" ]]; then
     echo "Resuming from token: $token_part" >&2
     if zfs send -t $token_part | pv >&${OUT}; then
         echo "Resume successful." >&2
-        finalize_and_exit MAGIC_RESUME_SUCCESS_RC
+        finalize_and_exit $MAGIC_RESUME_SUCCESS_RC
     else
         rc=$?
         echo "ERROR: resume failed with rc=$rc" >&2
@@ -175,14 +177,14 @@ done
 if [[ -n "$common" ]]; then
     echo "Sending incremental from [${$dataset}@${common}] to [${full_snap}]" >&2
     # determine size of the incremental send
-    size=$( zfs send -nP -Rwi "${dataset}@${common}" "${full_snap}" | awk '/^size/{print $2;exit}' )
-    # Incremental: -R (replicate), -w (raw), -i FROM@ TO@
-    zfs send -Rwi "${dataset}@${common}" "${full_snap}" | pv ${size:+-s "$size"} >&${OUT}
+    size=$( zfs send -nP wi "${dataset}@${common}" "${full_snap}" | awk '/^size/{print $2;exit}' )
+    # Incremental: -w (raw), -i FROM@ TO@
+    zfs send -wi "${dataset}@${common}" "${full_snap}" | pv ${size:+-s "$size"} >&${OUT}
 else
     echo "No common snapshot; full send: [${full_snap}]" >&2
     # determine size
-    size=$( zfs send -nP -Rw "${full_snap}" 2>&1 | awk '/^size/{print $2;exit}' )
-    zfs send -Rw "${full_snap}" | pv ${size:+-s "$size"} >&${OUT}
+    size=$( zfs send -nP w "${full_snap}" 2>&1 | awk '/^size/{print $2;exit}' )
+    zfs send -w "${full_snap}" | pv ${size:+-s "$size"} >&${OUT}
 fi
 echo "Send successful." >&2
 

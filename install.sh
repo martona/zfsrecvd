@@ -8,8 +8,9 @@ cp "$SCRIPT_DIR/cfgparser.sh"     /etc/zfsrecvd/cfgparser.sh
 cp "$SCRIPT_DIR/send.sh"          /etc/zfsrecvd/send.sh
 cp "$SCRIPT_DIR/listen.sh"        /etc/zfsrecvd/listen.sh
 cp "$SCRIPT_DIR/zfsrecvd.sh"      /etc/zfsrecvd/zfsrecvd.sh
-cp "$SCRIPT_DIR/sends.sh"         /etc/zfsrecvd/sends.sh
+cp "$SCRIPT_DIR/sendall.sh"       /etc/zfsrecvd/sendsall.sh
 cp "$SCRIPT_DIR/zfsrecvd.service" /etc/systemd/system/zfsrecvd.service
+rm /etc/zfsrecvd/sends.sh         # old name for sendall.sh
 
 if [[ ! -f /etc/zfsrecvd/zfsrecvd.conf ]]; then
     cp "$SCRIPT_DIR/zfsrecvd.conf" /etc/zfsrecvd/zfsrecvd.conf
