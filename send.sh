@@ -128,6 +128,7 @@ if [[ -n "$resume_token" ]]; then
     token_part="${token_part//[^a-zA-Z0-9-]/}"   
     echo "Resuming from token." >&2
     size=$( zfs send -nP -t "$token_part" | awk '/^size/{print $2;exit}' )
+    echo "Size of resume stream: $size" >&2
     if zfs send -t $token_part | pv "$PV_FORCE_FLAG" ${size:+-s "$size"} >&${OUT}; then
         echo "Resume successful." >&2
         finalize_and_exit $MAGIC_RESUME_SUCCESS_RC
