@@ -23,7 +23,7 @@ for entry in "${sends[@]}"; do
         prev_ds="$dataset"
     fi
 
-    we give the whole send business a few tries. 
+    # we give the whole send business a few tries
     keepgoing=0
     send_succ=false
     while [[ $keepgoing -lt 5 ]]; do
