@@ -57,7 +57,7 @@ dest_parent="$dest_base"
 # ---- 3. resume? -------------------------------------------------------------
 #
 token_ds=""
-zfs list -H -o name -t filesystem,volume -r "${dest_base}/${dataset}" 2>/dev/null | while read -r ds; do
+zfs list -H -o name -t filesystem,volume -r "${dest_base}/${dataset}" 2>/dev/null || true | while read -r ds; do
   # Check if the receive_resume_token property is set and not empty ('-')
   token_val=$(zfs get -H -p -o value receive_resume_token "$ds")
   if [[ "$token_val" != "-" ]]; then
