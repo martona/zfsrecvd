@@ -3,7 +3,9 @@
 # This function takes a command and its arguments, executes it,
 # and prepends a prefix to every line of its output (both stdout and stderr).
 run_indented() {
-  local prefix="$1"
-  shift
-  "$@" |& sed -u "s/^/${prefix}/"
+    local prefix=$1; shift
+    "$@" 2>&1 | gawk -v p="$prefix" '
+        BEGIN       { RS = "[\r\n]"; ORS = "" ; }
+        { printf "%s%s%s", p, $0, RT }
+    '
 }
