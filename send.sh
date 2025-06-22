@@ -125,7 +125,7 @@ if [[ -n "$resume_token" ]]; then
     dataset_part="${resume_token%%=*}"   # "tank/ds@snap"
     token_part="${resume_token#*=}"      # "abcd1234"
     token_part="${token_part//[^a-zA-Z0-9-]/}"   
-    echo "Resuming from token: $resume_token" >&2
+    echo "Resuming from token: $token_part" >&2
     if zfs send -t $token_part | pv >&${OUT}; then
         echo "Resume successful." >&2
         finalize_and_exit MAGIC_RESUME_SUCCESS_RC
