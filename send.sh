@@ -11,6 +11,32 @@
 set -euo pipefail
 source /etc/zfsrecvd/cfgparser.sh
 
+exit_script() {
+    local exit_code="$1"
+    exec {OUT}>&-      || true    # close our duplicate
+    exec {NET[1]}>&-   || true    # close the original write FD from coproc
+    wait "${NET_PID}"  || true
+    exit "$exit_code"
+}
+
+finalize_and_exit() {
+    local exit_code="$1"
+    # Read the response from the server. (It ends with an empty line.)
+    # We don't actually care what's in there - just making sure we don't
+    # close the FDs prematurely and prevent proper log output on the other side.
+    while true; do
+        if IFS= read -r -u "${IN}" line; then
+            if [[ -z $line ]]; then          # blank line => list finished
+                break
+            fi
+        else
+            rc=$?
+            echo "ERROR: lost connection while confirming completion."
+            exit_script rc
+        fi
+    done
+    exit_script "$exit_code"
+}
 #
 # ---------- 0.  arguments ----------------------------------------------------
 #
@@ -30,7 +56,7 @@ if [[ "$full_snap" != *@* ]]; then
     latest=$( zfs list -H -o name -t snapshot -s creation -d 1 "$full_snap" | tail -n 1 )
     if [[ -z "$latest" ]]; then
         echo "ERROR: dataset '$full_snap' has no snapshots" >&2
-        exit 65
+        exit 1
     fi
     echo "Autodetected newest snapshot: $latest" >&2
     full_snap="$latest"
@@ -59,41 +85,67 @@ exec  {IN}<&"${NET[0]}"   # read‑end from server
 #
 # ---------- 3.  send header --------------------------------------------------
 #
-printf 'zfsrecvd1.0\n%s\n' "${full_snap}" >&${OUT}
+printf 'zfsrecvd1.1\n%s\n\n' "${full_snap}" >&${OUT}
 
 #
 # ---------- 4.  receive remote snapshot list --------------------------------
 #
 remote_snaps=()
+resume_token=""
+already_there=false
 while true; do
     if IFS= read -r -u "${IN}" line; then
         if [[ -z $line ]]; then                  # blank line => list finished
             break
         fi
         if [[ "$line" == "TOKEN: "* ]]; then
-            # we don't handle these yet
             echo "Received token: $line" >&2
-            continue                            # skip this line
+            resume_token="${line#TOKEN: }"      # store for later use
+            continue
         fi
-        if [[ "$line" == */"$full_snap" ]]; then
-            echo "Snapshot [$full_snap] is already on [${remote}]; nothing to do." >&2
-            # close our side of the pipe cleanly so the server isn’t left hanging
-            exec {OUT}>&-
-            exec {NET[1]}>&-
-            wait "${NET_PID}"
-            exit 0
+        if [[ "$line" == SNAPSHOT:* ]]; then
+            line="${line#SNAPSHOT: }"           # strip prefix
+            if [[ "$line" == */"$full_snap" ]]; then
+                already_there=true
+            else
+                remote_snaps+=( "${line#*@}" )
+            fi
         fi
-        remote_snaps+=( "${line#*@}" )
     else
-        rc=$?                             # non‑zero status (1 = EOF, >1 = error)
+        rc=$?
         echo "ERROR: lost connection while pulling snapshot list (read rc=$rc)" >&2
-        wait "${NET_PID}"                 # reap socat
-        exit $rc                          # propagate error
+        exit_script "$rc"
     fi
 done
 
 #
-# ---------- 5.  build list of local snaps older than target ------------------
+# ---------- 5.  handle resumes before anything else --------------------------
+#
+if [[ -n "$resume_token" ]]; then
+    dataset_part="${resume_token%%=*}"   # "tank/ds@snap"
+    token_part="${resume_token#*=}"      # "abcd1234"
+    token_part="${token_part//[^a-zA-Z0-9-]/}"   
+    echo "Resuming from token: $resume_token" >&2
+    if zfs send -t $token_part | pv >&${OUT}; then
+        echo "Resume successful." >&2
+        finalize_and_exit MAGIC_RESUME_SUCCESS_RC
+    else
+        rc=$?
+        echo "ERROR: resume failed with rc=$rc" >&2
+        exit_script $rc
+    fi
+fi
+
+#
+# ---------- 6.  Nothing to do if destination dataset is already in place -----
+#
+if $already_there; then
+    echo "Snapshot already up to date on destination." >&2
+    exit_script 0
+fi
+
+#
+# ---------- 7.  build list of local snaps older than target ------------------
 #
 mapfile -t local_all < <(
     zfs list -H -o name -t snapshot -s creation "${dataset}"
@@ -106,7 +158,7 @@ for s in "${local_all[@]}"; do
 done
 
 #
-# ---------- 6.  find newest common ancestor ---------------------------------
+# ---------- 8.  find newest common ancestor ---------------------------------
 #
 common=""
 for (( idx=${#local_prior[@]}-1; idx>=0; idx-- )); do
@@ -118,7 +170,7 @@ for (( idx=${#local_prior[@]}-1; idx>=0; idx-- )); do
 done
 
 #
-# ---------- 7.  ship the stream ---------------------------------------------
+# ---------- 9.  ship the stream ---------------------------------------------
 #
 if [[ -n "$common" ]]; then
     echo "Sending incremental from $common to $snapname" >&2
@@ -134,26 +186,4 @@ else
 fi
 echo "Send successful." >&2
 
-# read the response from the server. (ends with an empty line)
-# we don't actually care what's in there - just making sure we don't
-# close the FDs prematurely and prevent proper log output on the other side.
-
-while true; do
-    if IFS= read -r -u "${IN}" line; then
-        if [[ -z $line ]]; then          # blank line => list finished
-            break
-        fi
-    else
-        rc=$?                             # non‑zero status (1 = EOF, >1 = error)
-        echo "ERROR: lost connection while confirming completion"
-        wait "${NET_PID}"                 # reap socat
-        exit $rc                          # propagate error
-    fi
-done
-
-#
-# ---------- 8.  tidy up ------------------------------------------------------
-#
-exec {OUT}>&-          # close our duplicate
-exec {NET[1]}>&-       # close the original write FD from coproc
-wait "${NET_PID}"
+finalize_and_exit 0

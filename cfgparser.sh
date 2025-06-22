@@ -5,11 +5,10 @@
 #   * allowed_hosts (bash array)
 #   * sends         (bash array)
 
-set -euo pipefail
-
 CFG="/etc/zfsrecvd/zfsrecvd.conf"
+MAGIC_RESUME_SUCCESS_RC=219
 
-recv_root="" tcp_port="" tcp_addr="" allowed_hosts=() sends=()
+recv_root="" tcp_port="" tcp_addr="" allowed_hosts=() sends=() orchestrator=()
 
 current=""
 while IFS= read -r line || [[ -n "$line" ]]; do
@@ -26,13 +25,14 @@ while IFS= read -r line || [[ -n "$line" ]]; do
         tcp-addr)      tcp_addr="$line"  ;;
         allowed_hosts) allowed_hosts+=( "$line" ) ;;
         sends)         sends+=( "$line" ) ;;
+        orchestrator)  orchestrator+=( "$line" ) ;;
     esac
 done < "$CFG"
 
 # resolve the address if needed.
 # early in the boot we might not have a DNS server yet,
 # or tailscale might not yet be up. we retry a few times 
-# to make the address resolvable if possible. 
+# to allow the address to become resolvable. 
 max_tries=5
 name_or_ip="$tcp_addr"
 for ((try=1; try<=max_tries; try++)); do

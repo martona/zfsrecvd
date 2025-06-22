@@ -25,13 +25,24 @@ echo "Processing connection from: $safe_cn" >&2
 #
 # ---- 2. read header lines ---------------------------------------------------
 #
-IFS= read -r version || { echo "ERROR: stream closed before header" >&2; exit 120; }
-[[ "$version" == "zfsrecvd1.0" ]] || { echo "ERROR: unsupported header '$version'" >&2; exit 121; }
+lines=()
+while true; do
+    IFS= read -r line || { echo "ERROR: reading header" >&2; exit 120; }
+    if [[ -z $line ]]; then                # blank line => list finished
+        break
+    fi
+    lines += ( "${line#*@}" )
+done
+if [[ ${#lines[@]} -lt 2 ]]; then
+    echo "ERROR: expected at least 2 lines header" >&2
+    exit 119
+fi
 
-IFS= read -r header || { echo "ERROR: dataset line missing" >&2; exit 122; }
-[[ "$header" =~ ^[A-Za-z0-9._/-]+@[A-Za-z0-9._-]+$ ]] || { echo "ERROR: malformed dataset line '$header'" >&2; exit 123; }
+[[ "${lines[0]}" == "zfsrecvd1.1" ]] || { echo "ERROR: unsupported version '${lines[0]}'" >&2; exit 118; }
+intent="${lines[1]}"
+[[ "$intent" =~ ^[A-Za-z0-9._/-]+@[A-Za-z0-9._-]+$ ]] || { echo "ERROR: malformed intent" >&2; exit 123; }
 
-dataset_with_snap="$header"                # e.g. "tank/outer/inner/actual@snap2025-06-18" 
+dataset_with_snap="$intent"                # e.g. "tank/outer/inner/actual@snap2025-06-18" 
 dataset="${dataset_with_snap%@*}"          # strip "@snap"
 leaf="${dataset##*/}"                      # last component
 parent="${dataset%/*}"                     # everything before leaf
@@ -59,7 +70,7 @@ zfs create -p "$dest_parent" 2>/dev/null || true
 # List any existing snapshots for the exact dataset path that will be updated.
 # Respond with this to client.
 echo "Listing existing snapshots for: ${dest_base}/$dataset" >&2
-zfs list -H -o name -t snapshot "${dest_base}/${dataset}" 2>/dev/null || true
+zfs list -H -o name -t snapshot "${dest_base}/${dataset}" 2>/dev/null | awk 'NF==1 {printf "SNAPSHOT: %s\n", $1}' || true
 # Append any resume tokens if available in the subtree.
 echo "Listing resume tokens for: ${dest_base}/${dataset}" >&2
 zfs get -H -o name,value receive_resume_token -r "${dest_base}/${dataset}" | awk 'NF==2 && $2!="-" {printf "TOKEN: %s=%s\n", $1, $2}' || true
@@ -74,4 +85,4 @@ echo
 #
 /sbin/zfs recv -s -u -F -e "$dest_parent"
 echo "Successfully completed: $dataset_with_snap" >&2
-printf 'done\n\n'
+printf 'DONE\n\n'
