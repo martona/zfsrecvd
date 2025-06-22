@@ -62,7 +62,7 @@ zfs list -H "$dest_base" >/dev/null 2>&1 || zfs create -o mountpoint=none "$dest
 # Create full path for recv target if doesn't exist (-o ignored with -p by zfs,
 # which is why we had to do the above step separately).
 # Ignore errors here, e.g. if path already exists.
-# zfs create -p "$dest_parent" 2>/dev/null || true
+zfs create -p "$dest_parent" 2>/dev/null || true
 
 #
 # ---- 4. send snapshot list back to client ---------------------------------
@@ -83,6 +83,6 @@ echo
 # ---- 5. hand stream off to ZFS ----------------------------------------------
 #
 echo "Receiving: $dataset_with_snap" >&2
-/sbin/zfs recv -s -u "$dest_base"
+/sbin/zfs recv -s -u -F -e "$dest_parent"
 echo "Successfully completed: $dataset_with_snap" >&2
 printf 'DONE\n\n'
