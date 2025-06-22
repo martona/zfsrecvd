@@ -70,10 +70,10 @@ zfs create -p "$dest_parent" 2>/dev/null || true
 # List any existing snapshots for the exact dataset path that will be updated.
 # Respond with this to client.
 echo "Listing existing snapshots for: ${dest_base}/$dataset" >&2
-zfs list -H -o name -t snapshot "${dest_base}/${dataset}" 2>/dev/null | awk 'NF==1 {printf "SNAPSHOT: %s\n", $1}' || true
+zfs list -H -o name -t snapshot "${dest_base}/${dataset}" 2>/dev/null | awk 'NF==1 {printf "SNAPSHOT: %s\n", $1}' | tee /dev/stderr || true
 # Append any resume tokens if available in the subtree.
 echo "Listing resume tokens for: ${dest_base}/${dataset}" >&2
-zfs get -H -o name,value receive_resume_token -r "${dest_base}/${dataset}" | awk 'NF==2 && $2!="-" {printf "TOKEN: %s=%s\n", $1, $2}' || true
+zfs get -H -o name,value receive_resume_token -r "${dest_base}/${dataset}" | awk 'NF==2 && $2!="-" {printf "TOKEN: %s=%s\n", $1, $2}' | tee /dev/stderr || true
 # Complete the list with a single empty line.
 echo
 
