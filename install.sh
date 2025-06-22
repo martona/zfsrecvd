@@ -11,7 +11,6 @@ cp "$SCRIPT_DIR/send.sh"          /etc/zfsrecvd/
 cp "$SCRIPT_DIR/listen.sh"        /etc/zfsrecvd/
 cp "$SCRIPT_DIR/zfsrecvd.sh"      /etc/zfsrecvd/
 cp "$SCRIPT_DIR/zfsrecvd.service" /etc/systemd/system/zfsrecvd.service
-rm /etc/zfsrecvd/sends.sh         # old name for sendall.sh
 
 if [[ ! -f /etc/zfsrecvd/zfsrecvd.conf ]]; then
     cp "$SCRIPT_DIR/zfsrecvd.conf" /etc/zfsrecvd/zfsrecvd.conf
