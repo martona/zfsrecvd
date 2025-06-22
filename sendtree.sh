@@ -45,10 +45,13 @@ while read -r ds; do
             sleep 5
             echo "    Retrying [$ds$snapname] to [$remote] (attempt $((retry + 1)))" >&2
         fi
-        /etc/zfsrecvd/send.sh "$ds$snapname" "$remote"
-        rc=$?
-        if [[ $rc -eq 0 ]]; then
+        if /etc/zfsrecvd/send.sh "$ds$snapname" "$remote"; then
             break
+        fi
+        rc=$?
+        if [[ $rc -eq $MAGIC_RESUME_SUCCESS_RC ]]; then
+            # not actually doing anything special here yet,
+            # just fall through into a retry which makes sense for this part anyway
         fi
         ((retry++))
     done
