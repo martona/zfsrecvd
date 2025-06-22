@@ -32,7 +32,7 @@ finalize_and_exit() {
         else
             rc=$?
             echo "ERROR: lost connection while confirming completion."
-            exit_script rc
+            exit_script $rc
         fi
     done
     exit_script "$exit_code"
