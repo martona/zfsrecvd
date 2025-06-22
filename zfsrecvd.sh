@@ -72,7 +72,7 @@ if [[ -n "$token_ds" ]]; then
     echo "TOKEN: $token_ds=$token_val"
     echo
     echo "Resuming dataset: [${token_ds}]" >&2
-    zfs recv "$token_ds"
+    zfs recv -s "$token_ds"
     echo "Successfully resumed & completed [${token_ds}]" >&2
     echo DONE
     echo
