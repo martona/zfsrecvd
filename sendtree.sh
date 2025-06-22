@@ -43,7 +43,7 @@ while read -r ds; do
     retry=0
     max_retries=5
     while [[ $retry -lt $max_retries ]]; do
-        ((retry++))
+        ((++retry))
         echo "Sending [$ds$snapname] to [$remote]" >&2
         if [[ $retry -gt 0 ]]; then
             sleep 5
