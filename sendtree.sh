@@ -28,7 +28,7 @@ dataset=""
 snapname=""
 if [[ "$full_snap" == *@* ]]; then
     dataset="${full_snap%@*}"     # tank/ds
-    snapname="${full_snap#*@}"    # snap
+    snapname="@${full_snap#*@}"    # snap
 else
     dataset="$full_snap"          # tank/ds
 fi
@@ -42,10 +42,10 @@ while read -r ds; do
     while [[ $retry -lt $max_retries ]]; do
         if [[ $retry -gt 0 ]]; then
             sleep 5
-            echo "Retrying [$ds@$snapname] to [$remote] (attempt $((retry + 1)))" >&2
+            echo "Retrying [$ds$snapname] to [$remote] (attempt $((retry + 1)))" >&2
         fi
-        echo "Sending [$ds@$snapname] to [$remote]" >&2
-        /etc/zfsrecvd/send.sh "$ds@$snapname" "$remote"
+        echo "Sending [$ds$snapname] to [$remote]" >&2
+        /etc/zfsrecvd/send.sh "$ds$snapname" "$remote"
         rc=$?
         if [[ $rc -eq 0 ]]; then
             break
