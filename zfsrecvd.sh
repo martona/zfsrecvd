@@ -83,6 +83,6 @@ echo
 # ---- 5. hand stream off to ZFS ----------------------------------------------
 #
 echo "Receiving: $dataset_with_snap" >&2
-/sbin/zfs recv -s -u -F "$dest_base"
+/sbin/zfs recv -s -u "$dest_base"
 echo "Successfully completed: $dataset_with_snap" >&2
 printf 'DONE\n\n'
