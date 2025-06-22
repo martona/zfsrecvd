@@ -48,13 +48,36 @@ leaf="${dataset##*/}"                      # last component
 parent="${dataset%/*}"                     # everything before leaf
 [[ "$parent" == "$dataset" ]] && parent="" # no slash case
 echo "Intent: $dataset_with_snap" >&2
+dest_base="${recv_root}/${safe_cn}"        # ebs/recv/hostname
+dest_parent="$dest_base"
+[[ -n "$parent" ]] && dest_parent="${dest_base}/${parent}" # ebs/recv/hostname/ds_path_minus_last_component
+
+
+#
+# ---- 3. resume? -------------------------------------------------------------
+#
+token_ds=""
+zfs list -H -o name -t filesystem,volume -r "${dest_base}/${dataset}" 2>/dev/null | while read -r ds; do
+  # Check if the receive_resume_token property is set and not empty ('-')
+  token_val=$(zfs get -H -p -o value receive_resume_token "$ds")
+  if [[ "$token_val" != "-" ]]; then
+    token_ds="$ds"
+  fi
+done
+if [[ -n "$token_ds" ]]; then
+    # tell client that we've found a token; we expect it to resume from it.
+    echo "TOKEN: $token_ds=$token_val"
+    echo
+    zfs recv "$token_ds"
+    echo "Successfully resumed: $token_ds" >&2
+    echo DONE
+    echo
+    exit 0
+fi
 
 #
 # ---- 3. ensure parent datasets exist ----------------------------------------
 #
-dest_base="${recv_root}/${safe_cn}"        # ebs/recv/hostname
-dest_parent="$dest_base"
-[[ -n "$parent" ]] && dest_parent="${dest_base}/${parent}" # ebs/recv/hostname/ds_path_minus_last_component
 
 # If hostname wasn't seen before, create its root dataset without a mountpoint.
 zfs list -H "$dest_base" >/dev/null 2>&1 || zfs create -o mountpoint=none "$dest_base"
