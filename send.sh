@@ -23,7 +23,7 @@ fi
 
 full_snap="$1"           # tank/ds@snap
 remote="$2"              # DNS name or IP of zfsrecvd listener
-$indent="        "       # indent for log messages
+indent="        "        # indent for log messages
 exit_script() {
     local exit_code="$1"
     exec {OUT}>&-      || true    # close our duplicate
