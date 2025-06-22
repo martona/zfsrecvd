@@ -183,7 +183,7 @@ if [[ -n "$common" ]]; then
 else
     echo "No common snapshot; full send: [${full_snap}]" >&2
     # determine size
-    size=$( zfs send -nP w "${full_snap}" 2>&1 | awk '/^size/{print $2;exit}' )
+    size=$( zfs send -nP -w "${full_snap}" 2>&1 | awk '/^size/{print $2;exit}' )
     zfs send -w "${full_snap}" | pv ${size:+-s "$size"} >&${OUT}
 fi
 echo "Send successful." >&2
