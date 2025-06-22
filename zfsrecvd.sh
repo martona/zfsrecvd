@@ -13,11 +13,11 @@ source /etc/zfsrecvd/cfgparser.sh
 cn="${SOCAT_OPENSSL_X509_COMMONNAME-}"
 if [[ -z "$cn" ]]; then
     echo "ERROR: TLS CN missing; socat not started with OPENSSL-LISTEN verify=1?" >&2
-    exit 111
+    exit 1
 fi
 if ! [[ " ${allowed_hosts[*]} " == *" $cn "* ]]; then
     echo "ERROR: CN '$cn' not authorized" >&2
-    exit 113
+    exit 1
 fi
 safe_cn=${cn//[^[:alnum:]._-]/_}           # basic sanitization
 echo "Processing connection from: $safe_cn" >&2
@@ -27,7 +27,7 @@ echo "Processing connection from: $safe_cn" >&2
 #
 lines=()
 while true; do
-    IFS= read -r line || { echo "ERROR: reading header" >&2; exit 120; }
+    IFS= read -r line || { echo "ERROR: reading header" >&2; exit 1; }
     if [[ -z $line ]]; then                # blank line => list finished
         break
     fi
@@ -38,9 +38,9 @@ if [[ ${#lines[@]} -lt 2 ]]; then
     exit 119
 fi
 
-[[ "${lines[0]}" == "zfsrecvd1.1" ]] || { echo "ERROR: unsupported version '${lines[0]}'" >&2; exit 118; }
+[[ "${lines[0]}" == "zfsrecvd1.1" ]] || { echo "ERROR: unsupported version '${lines[0]}'" >&2; exit 1; }
 intent="${lines[1]}"
-[[ "$intent" =~ ^[A-Za-z0-9._/-]+@[A-Za-z0-9._-]+$ ]] || { echo "ERROR: malformed intent" >&2; exit 123; }
+[[ "$intent" =~ ^[A-Za-z0-9._/-]+@[A-Za-z0-9._-]+$ ]] || { echo "ERROR: malformed intent: [$intent]" >&2; exit 1; }
 
 dataset_with_snap="$intent"                # e.g. "tank/outer/inner/actual@snap2025-06-18" 
 dataset="${dataset_with_snap%@*}"          # strip "@snap"
