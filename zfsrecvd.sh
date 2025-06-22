@@ -65,7 +65,7 @@ while read -r ds; do
     token_ds="$ds"
     break
   fi
-done < <(zfs list -H -o name -t filesystem,volume -r "${dest_base}/${dataset}" 2>/dev/null || true)
+done < <(zfs list -H -o name -t filesystem,volume "${dest_base}/${dataset}" 2>/dev/null || true)
 
 if [[ -n "$token_ds" ]]; then
     # tell client that we've found a token; we expect it to resume from it.
