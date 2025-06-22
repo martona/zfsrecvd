@@ -58,8 +58,8 @@ if [[ "$full_snap" != *@* ]]; then
         echo "ERROR: dataset '$full_snap' has no snapshots" >&2
         exit 1
     fi
-    echo "Autodetected newest snapshot: $latest" >&2
-    full_snap="$latest"
+    full_snap="$dataset@$latest"
+    echo "Autodetected newest snapshot: $full_snap" >&2
 fi
 
 dataset="${full_snap%@*}"     # tank/ds
