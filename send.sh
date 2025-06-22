@@ -101,7 +101,6 @@ while true; do
             break
         fi
         if [[ "$line" == "TOKEN: "* ]]; then
-            echo "Received token: $line" >&2
             resume_token="${line#TOKEN: }"      # store for later use
             continue
         fi
@@ -125,10 +124,11 @@ done
 #
 if [[ -n "$resume_token" ]]; then
     dataset_part="${resume_token%%=*}"   # "tank/ds@snap"
-    token_part="${resume_token#*=}"      # "abcd1234"
+    token_part="${resume_token#*=}"      # "1-136b462817-110-789..."
     token_part="${token_part//[^a-zA-Z0-9-]/}"   
-    echo "Resuming from token: $token_part" >&2
-    if zfs send -t $token_part | pv >&${OUT}; then
+    echo "Resuming from token." >&2
+    size=$( zfs send -t "$token_part" | awk '/^size/{print $2;exit}' )
+    if zfs send -t $token_part | pv ${size:+-s "$size"} >&${OUT}; then
         echo "Resume successful." >&2
         finalize_and_exit $MAGIC_RESUME_SUCCESS_RC
     else
