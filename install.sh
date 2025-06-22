@@ -10,6 +10,7 @@ cp "$SCRIPT_DIR/sendtree.sh"      /etc/zfsrecvd/
 cp "$SCRIPT_DIR/send.sh"          /etc/zfsrecvd/
 cp "$SCRIPT_DIR/listen.sh"        /etc/zfsrecvd/
 cp "$SCRIPT_DIR/zfsrecvd.sh"      /etc/zfsrecvd/
+cp "$SCRIPT_DIR/run_indented.sh"  /etc/zfsrecvd/
 cp "$SCRIPT_DIR/zfsrecvd.service" /etc/systemd/system/zfsrecvd.service
 
 if [[ ! -f /etc/zfsrecvd/zfsrecvd.conf ]]; then

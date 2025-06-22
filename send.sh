@@ -23,7 +23,6 @@ fi
 
 full_snap="$1"           # tank/ds@snap
 remote="$2"              # DNS name or IP of zfsrecvd listener
-indent="        "        # indent for log messages
 exit_script() {
     local exit_code="$1"
     exec {OUT}>&-      || true    # close our duplicate
@@ -44,7 +43,7 @@ finalize_and_exit() {
             fi
         else
             rc=$?
-            echo "$indent ERROR: lost connection while confirming completion."
+            echo "ERROR: lost connection while confirming completion."
             exit_script $rc
         fi
     done
@@ -58,11 +57,11 @@ if [[ "$full_snap" != *@* ]]; then
     # Caller gave only a dataset; pick its most recent snapshot.
     latest=$( zfs list -H -o name -t snapshot -s creation -d 1 "$full_snap" | tail -n 1 )
     if [[ -z "$latest" ]]; then
-        echo "$indent ERROR: dataset '$full_snap' has no snapshots" >&2
+        echo "ERROR: dataset '$full_snap' has no snapshots" >&2
         exit 1
     fi
     full_snap="$latest"
-    echo "$indent Autodetected newest snapshot: $full_snap" >&2
+    echo "Newest local snapshot: $full_snap" >&2
 fi
 
 dataset="${full_snap%@*}"     # tank/ds
@@ -115,7 +114,7 @@ while true; do
         fi
     else
         rc=$?
-        echo "$indent ERROR: lost connection while receiving snapshot list (read rc=$rc)" >&2
+        echo "ERROR: lost connection while receiving snapshot list (read rc=$rc)" >&2
         exit_script "$rc"
     fi
 done
@@ -127,14 +126,14 @@ if [[ -n "$resume_token" ]]; then
     dataset_part="${resume_token%%=*}"   # "tank/ds@snap"
     token_part="${resume_token#*=}"      # "1-136b462817-110-789..."
     token_part="${token_part//[^a-zA-Z0-9-]/}"   
-    echo "$indent Resuming from token." >&2
+    echo "Resuming from token." >&2
     size=$( zfs send -nP -t "$token_part" | awk '/^size/{print $2;exit}' )
-    if zfs send -t $token_part | pv  ${size:+-s "$size"} >&${OUT}; then
-        echo "$indent Resume successful." >&2
+    if zfs send -t $token_part | pv  -e ${size:+-s "$size"} >&${OUT}; then
+        echo "Resume successful." >&2
         finalize_and_exit $MAGIC_RESUME_SUCCESS_RC
     else
         rc=$?
-        echo "$indent ERROR: resume failed with rc=$rc" >&2
+        echo "ERROR: resume failed with rc=$rc" >&2
         exit_script $rc
     fi
 fi
@@ -143,7 +142,7 @@ fi
 # ---------- 6.  Nothing to do if destination dataset is already in place -----
 #
 if $already_there; then
-    echo "$indent Snapshot already up to date on destination." >&2
+    echo "Snapshot already up to date on destination." >&2
     exit_script 0
 fi
 
@@ -176,17 +175,17 @@ done
 # ---------- 9.  ship the stream ---------------------------------------------
 #
 if [[ -n "$common" ]]; then
-    echo "$indent Sending incremental from [${$dataset}@${common}] to [${full_snap}]" >&2
+    echo "Sending incremental from [${$dataset}@${common}] to [${full_snap}]" >&2
     # determine size of the incremental send
     size=$( zfs send -nP wi "${dataset}@${common}" "${full_snap}" | awk '/^size/{print $2;exit}' )
     # Incremental: -w (raw), -i FROM@ TO@
-    zfs send -wi "${dataset}@${common}" "${full_snap}" | pv ${size:+-s "$size"} >&${OUT}
+    zfs send -wi "${dataset}@${common}" "${full_snap}" | pv -e ${size:+-s "$size"} >&${OUT}
 else
-    echo "$indent No common snapshot; full send: [${full_snap}]" >&2
+    echo "No common snapshot; full send: [${full_snap}]" >&2
     # determine size
     size=$( zfs send -nP -w "${full_snap}" 2>&1 | awk '/^size/{print $2;exit}' )
-    zfs send -w "${full_snap}" | pv ${size:+-s "$size"} >&${OUT}
+    zfs send -w "${full_snap}" | pv -e ${size:+-s "$size"} >&${OUT}
 fi
-echo "$indent Send successful." >&2
+echo "Send successful." >&2
 
 finalize_and_exit 0

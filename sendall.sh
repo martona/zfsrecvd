@@ -5,6 +5,7 @@
 
 set -euo pipefail
 source /etc/zfsrecvd/cfgparser.sh
+source /etc/zfsrecvd/run_indented.sh
 
 prev_ds=""
 snap="manual-$(date -u +%Y-%m-%d-%H%MZ)"
@@ -25,7 +26,7 @@ for entry in "${sends[@]}"; do
     fi
 
     # Perform the send.
-    /etc/zfsrecvd/sendtree.sh "$dataset" "$host"
+    run_indented "        [sendtree]" /etc/zfsrecvd/sendtree.sh "$dataset" "$host"
     rc=$?
     if [[ $rc -eq 0 ]]; then
         succs+=( "$dataset@$snap -> $host" )
