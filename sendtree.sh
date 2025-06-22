@@ -47,10 +47,9 @@ while read -r ds; do
         echo "Sending [$ds@$snapname] to [$remote]" >&2
         /etc/zfsrecvd/send.sh "$ds@$snapname" "$remote"
         rc=$?
-        # if successful
         if [[ $rc -eq 0 ]]; then
             break
-        else
+        fi
         ((retry++))
-    endif
+    done
 done < <(zfs list -r -H -o name -t filesystem,volume "$dataset")
