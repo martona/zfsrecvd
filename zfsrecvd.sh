@@ -52,9 +52,9 @@ echo "Intent: $dataset_with_snap" >&2
 #
 # ---- 3. ensure parent datasets exist ----------------------------------------
 #
-dest_base="${recv_root}/${safe_cn}"
+dest_base="${recv_root}/${safe_cn}"        # ebs/recv/hostname
 dest_parent="$dest_base"
-[[ -n "$parent" ]] && dest_parent="${dest_base}/${parent}"
+[[ -n "$parent" ]] && dest_parent="${dest_base}/${parent}" # ebs/recv/hostname/ds_path_minus_last_component
 
 # If hostname wasn't seen before, create its root dataset without a mountpoint.
 zfs list -H "$dest_base" >/dev/null 2>&1 || zfs create -o mountpoint=none "$dest_base"
@@ -67,23 +67,22 @@ zfs list -H "$dest_base" >/dev/null 2>&1 || zfs create -o mountpoint=none "$dest
 #
 # ---- 4. send snapshot list back to client ---------------------------------
 #
-# List any existing snapshots for the exact dataset path that will be updated.
+# List any existing snapshots and resume tokens for the exact dataset path.
 # Respond with this to client.
 echo "Listing existing snapshots for: ${dest_base}/$dataset" >&2
 zfs list -H -o name -t snapshot "${dest_base}/${dataset}" 2>/dev/null | awk 'NF==1 {printf "SNAPSHOT: %s\n", $1}' | tee /dev/stderr || true
-# Append any resume tokens if available in the subtree.
 echo "Listing resume tokens for: ${dest_base}/${dataset}" >&2
-zfs get -H -o name,value receive_resume_token -r "${dest_base}/${dataset}" | awk 'NF==2 && $2!="-" {printf "TOKEN: %s=%s\n", $1, $2}' | tee /dev/stderr || true
+zfs get -H -o name,value receive_resume_token -r "${dest_base}/${dataset}" 2>/dev/null | awk 'NF==2 && $2!="-" {printf "TOKEN: %s=%s\n", $1, $2}' | tee /dev/stderr || true
 # Complete the list with a single empty line.
 echo
 
 # Client will process this list and decide whether to send a full or 
-# incremental send. Our `zfs recv` will handle both cases.
+# incremental send. One `zfs recv` will handle both cases.
 
 #
 # ---- 5. hand stream off to ZFS ----------------------------------------------
 #
 echo "Receiving: $dataset_with_snap" >&2
-/sbin/zfs recv -s -u -F "$dest_parent"
+/sbin/zfs recv -s -u -F "$dest_base"
 echo "Successfully completed: $dataset_with_snap" >&2
 printf 'DONE\n\n'
