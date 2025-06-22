@@ -58,7 +58,7 @@ if [[ "$full_snap" != *@* ]]; then
         echo "ERROR: dataset '$full_snap' has no snapshots" >&2
         exit 1
     fi
-    full_snap="$full_snap@$latest"
+    full_snap="$latest"
     echo "Autodetected newest snapshot: $full_snap" >&2
 fi
 
