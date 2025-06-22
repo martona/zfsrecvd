@@ -40,11 +40,11 @@ while read -r ds; do
     retry=0
     max_retries=5
     while [[ $retry -lt $max_retries ]]; do
+        echo "Sending [$ds$snapname] to [$remote]" >&2
         if [[ $retry -gt 0 ]]; then
             sleep 5
-            echo "Retrying [$ds$snapname] to [$remote] (attempt $((retry + 1)))" >&2
+            echo "    Retrying [$ds$snapname] to [$remote] (attempt $((retry + 1)))" >&2
         fi
-        echo "Sending [$ds$snapname] to [$remote]" >&2
         /etc/zfsrecvd/send.sh "$ds$snapname" "$remote"
         rc=$?
         if [[ $rc -eq 0 ]]; then

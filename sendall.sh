@@ -25,7 +25,6 @@ for entry in "${sends[@]}"; do
     fi
 
     # Perform the send.
-    echo "Sending [$dataset] to [$host]" >&2
     /etc/zfsrecvd/sendtree.sh "$dataset" "$host"
     rc=$?
     if [[ $rc -eq 0 ]]; then
