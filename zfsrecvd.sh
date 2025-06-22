@@ -47,7 +47,7 @@ dataset="${dataset_with_snap%@*}"          # strip "@snap"
 leaf="${dataset##*/}"                      # last component
 parent="${dataset%/*}"                     # everything before leaf
 [[ "$parent" == "$dataset" ]] && parent="" # no slash case
-echo "Receiving: $dataset_with_snap" >&2
+echo "Intent: $dataset_with_snap" >&2
 
 #
 # ---- 3. ensure parent datasets exist ----------------------------------------
@@ -83,6 +83,7 @@ echo
 #
 # ---- 5. hand stream off to ZFS ----------------------------------------------
 #
+echo "Receiving: $dataset_with_snap" >&2
 /sbin/zfs recv -s -u -F -e "$dest_parent"
 echo "Successfully completed: $dataset_with_snap" >&2
 printf 'DONE\n\n'
