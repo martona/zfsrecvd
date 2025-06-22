@@ -45,3 +45,10 @@ done
 if [[ -z "$recv_root" ]]; then recv_root="ebs/recv"; fi
 if [[ -z "$tcp_port"  ]]; then tcp_port=5299;        fi
 if [[ -z "$tcp_addr"  ]]; then tcp_addr="127.0.0.1"; fi
+
+# force pv to display output. inner scripts will run through run_indented.sh so they
+# won't see a terminal, but will inherit this variable.
+if [ -t 2 ]; then
+    # stderr is a terminal
+    export PV_FORCE_FLAG="-f"
+fi
