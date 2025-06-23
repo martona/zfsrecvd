@@ -21,9 +21,9 @@ if [[ -n "${orchec2up[*]}" ]]; then
     fi
     printf 'Starting EC2 instances:\n'
     printf '  %s\n' "${orchec2up[@]}" >&2
-    instances_to_stop=($(aws ec2 start-instances --instance-ids "${orchec2up[@]}" --query 'StartingInstances[?PreviousState.Name==`stopped`].InstanceId' --output text))
-    printf '  %d will be stopped after the operation\n' "${#instances_to_stop[@]}" >&2
-    aws ec2 wait instance-running --instance-ids "${instances_to_stop[@]}"
+    ec2_instances_to_stop=($(aws ec2 start-instances --instance-ids "${orchec2up[@]}" --query 'StartingInstances[?PreviousState.Name==`stopped`].InstanceId' --output text))
+    printf '  %d will be stopped after the operation\n' "${#ec2_instances_to_stop[@]}" >&2
+    aws ec2 wait instance-running --instance-ids "${ec2_instances_to_stop[@]}"
 fi
 
 for entry in "${orchtargets[@]}"; do
