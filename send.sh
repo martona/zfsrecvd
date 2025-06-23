@@ -193,6 +193,13 @@ if [[ "$enc_root" != "-" ]]; then               # "-" means dataset not encrypte
     [[ "$enc_prop" != "off" ]] && SEND_RAW="-w"  # if encrypted, send raw
 fi
 
+# There's still a bug in OpenZFS (similar to 13033) that won't allow the receipt of
+# an unencrypted dataset into an encrypted one. (I.e. Ubuntu keystore zvol into rpool.)
+# Receiving raw works around this issue. We'll take the very easy way out and just do raw
+# on everything. 
+
+SEND_RAW="-w"
+
 #
 # ---------- 9.  ship the stream ---------------------------------------------
 #

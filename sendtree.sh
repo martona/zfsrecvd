@@ -42,6 +42,7 @@ sentinel=$(mktemp)
 while read -r ds; do
     retry=0
     max_retries=5
+    rc=0
     while [[ $retry -lt $max_retries ]]; do
         ((++retry))
         echo "Sending [$ds$snapname] to [$remote]" >&2
@@ -64,6 +65,11 @@ while read -r ds; do
             break
         fi
     done
+    if [[ $rc -ne 0 ]]; then
+        echo "ERROR: Failed to send [$ds$snapname] to [$remote] (rc=$rc)" >&2
+        echo "Check the logs on the remote host for more details." >&2
+        exit $rc
+    fi
 done < <(zfs list -r -H -o name -t filesystem,volume "$dataset")
 
 #
