@@ -53,5 +53,5 @@ if [ -t 2 ]; then
 fi
 if [ -z "$PV_FORCE_FLAG" ]; then
     # avoid unbound variable errors
-    PV_FORCE_FLAG=""
+    export PV_FORCE_FLAG=""
 fi
