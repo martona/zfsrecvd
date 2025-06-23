@@ -60,3 +60,8 @@ if [[ -n "${ec2_instances_to_stop[*]}" ]]; then
     printf '  %s\n' "${ec2_instances_to_stop[@]}" >&2
     aws ec2 stop-instances --instance-ids "${ec2_instances_to_stop[@]}" >/dev/null
 fi
+
+if [[ ${#fails[@]} -gt 0 ]]; then
+    echo "Exiting with error code due to failed hosts." >&2
+    exit 1
+fi

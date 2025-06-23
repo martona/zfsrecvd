@@ -44,4 +44,5 @@ fi
 if [[ ${#fails[@]} -gt 0 ]]; then
     echo "Failed sends:"
     printf '  %s\n' "${fails[@]}" >&2
+    exit 1
 fi
