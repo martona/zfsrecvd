@@ -194,11 +194,17 @@ if [[ "$enc_root" != "-" ]]; then               # "-" means dataset not encrypte
 fi
 
 # There's still a bug in OpenZFS (similar to 13033) that won't allow the receipt of
-# an unencrypted dataset into an encrypted one. (I.e. Ubuntu keystore zvol into rpool.)
-# Receiving raw works around this issue. We'll take the very easy way out and just do raw
-# on everything. 
+# an unencrypted dataset into an encrypted one when sent without -R. (E.g. Ubuntu keystore 
+# zvol into its parent rpool.)
+# Sending with -R works around this issue. We'll force this flag for volumes only.
 
-SEND_RAW="-w"
+if [[ -z SEND_RAW ]]; then
+    # If the dataset is a volume, we need to send it with -R to ensure that the
+    # properties are set correctly on the destination.
+    if zfs list -H -o type "$dataset" | grep -q '^volume$'; then
+        SEND_RAW="-R"
+    fi
+fi
 
 #
 # ---------- 9.  ship the stream ---------------------------------------------
