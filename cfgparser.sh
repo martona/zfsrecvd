@@ -51,7 +51,7 @@ if [ -t 2 ]; then
     # stderr is a terminal
     export PV_FORCE_FLAG="-f"
 fi
-if [ -z "$PV_FORCE_FLAG" ]; then
+if [[ -z "${PV_FORCE_FLAG+x}" ]]; then
     # avoid unbound variable errors
     export PV_FORCE_FLAG=""
 fi
