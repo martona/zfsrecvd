@@ -105,6 +105,6 @@ echo
 # ---- 5. hand stream off to ZFS ----------------------------------------------
 #
 echo "Receiving: $dataset_with_snap" >&2
-/sbin/zfs recv -s -u -F -e "$dest_parent"
+/sbin/zfs recv -s -u -F -e -x canmount -x keylocation "$dest_parent"
 echo "Successfully completed: $dataset_with_snap" >&2
 printf 'DONE\n\n'
