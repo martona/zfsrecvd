@@ -198,7 +198,7 @@ fi
 # zvol into its parent rpool.)
 # Sending with -R works around this issue. We'll force this flag for volumes only.
 
-if [[ -z SEND_RAW ]]; then
+if [[ -z $SEND_RAW ]]; then
     # If the dataset is a volume, we need to send it with -R to ensure that the
     # properties are set correctly on the destination.
     if zfs list -H -o type "$dataset" | grep -q '^volume$'; then
