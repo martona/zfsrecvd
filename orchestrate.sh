@@ -4,6 +4,7 @@
 
 set -euo pipefail
 source /etc/zfsrecvd/cfgparser.sh
+source /etc/zfsrecvd/run_indented.sh
 
 succs=()
 fails=()
