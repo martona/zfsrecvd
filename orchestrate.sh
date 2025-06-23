@@ -15,7 +15,7 @@ if [[ -n "${orchec2up[*]}" ]]; then
         echo "ERROR: AWS CLI is not installed, but orchestrator-ec2up section is present in the config." >&2
         exit 1
     fi
-    if ! aws ec2 describe-instances; then
+    if ! aws ec2 describe-instances > /dev/null 2>&1; then
         echo "ERROR: AWS CLI failed to connect to EC2 service. Check your credentials." >&2
         exit 1
     fi
