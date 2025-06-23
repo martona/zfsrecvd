@@ -17,10 +17,10 @@ for entry in "${orchestrator[@]}"; do
     echo "Connecting to [$user@$host] to execute sends.sh" >&2
     if ssh -o ConnectTimeout=10 -o BatchMode=yes "$user@$host" sudo /etc/zfsrecvd/sends.sh
     then
-        succs+=$("$host")
+        succs+=("$host")
     else
         rc=$?
-        fails+=$("$host (rc=$rc)")
+        fails+=("$host (rc=$rc)")
         echo "ERROR: SSH connection to [$user@$host] failed" >&2
     fi    
 done
