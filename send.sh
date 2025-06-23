@@ -199,7 +199,7 @@ SEND_RAW=$([[ $need_raw == true ]] && echo "-w" || echo "")
 # ---------- 9.  ship the stream ---------------------------------------------
 #
 if [[ -n "$common" ]]; then
-    echo "Sending incremental from [${$dataset}@${common}] to [${full_snap}]" >&2
+    echo "Sending incremental from [${dataset}@${common}] to [${full_snap}]" >&2
     # determine size of the incremental send
     size=$( zfs send -nP $SEND_RAW -i "${dataset}@${common}" "${full_snap}" | awk '/^size/{print $2;exit}' )
     # Incremental: -w (raw), -i FROM@ TO@
