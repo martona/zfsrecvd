@@ -201,12 +201,12 @@ if [[ -n "$common" ]]; then
     # determine size of the incremental send
     size=$( zfs send -nP $SEND_RAW -i "${dataset}@${common}" "${full_snap}" | awk '/^size/{print $2;exit}' )
     # Incremental: -w (raw), -i FROM@ TO@
-    zfs send $SEND_RAW -i "${dataset}@${common}" "${full_snap}" | pv "${PV_FORCE_FLAG:-}" ${size:+-s "$size"} >&${OUT}
+    zfs send $SEND_RAW -i "${dataset}@${common}" "${full_snap}" | pv "${PV_FORCE_FLAG}" ${size:+-s "$size"} >&${OUT}
 else
     echo "No common snapshot; full send: [${full_snap}]" >&2
     # determine size
     size=$( zfs send -nP $SEND_RAW "${full_snap}" 2>&1 | awk '/^size/{print $2;exit}' )
-    zfs send $SEND_RAW "${full_snap}" | pv "${PV_FORCE_FLAG:-}" ${size:+-s "$size"} >&${OUT}
+    zfs send $SEND_RAW "${full_snap}" | pv "${PV_FORCE_FLAG}" ${size:+-s "$size"} >&${OUT}
 fi
 echo "Send successful." >&2
 
