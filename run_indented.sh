@@ -9,3 +9,10 @@ run_indented() {
         { printf "%s%s%s", p, $0, RT }
     '
 }
+
+# The above fails to produce output if used through SSH - i'll disable it here 
+# for now.
+run_indented() {
+    shift
+    "$@"
+}
