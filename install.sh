@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 mkdir -p /etc/zfsrecvd
 cp "$SCRIPT_DIR/cfgparser.sh"     /etc/zfsrecvd/
+cp "$SCRIPT_DIR/orchestrate.sh"   /etc/zfsrecvd/
 cp "$SCRIPT_DIR/sendall.sh"       /etc/zfsrecvd/
 cp "$SCRIPT_DIR/sendtree.sh"      /etc/zfsrecvd/
 cp "$SCRIPT_DIR/send.sh"          /etc/zfsrecvd/
