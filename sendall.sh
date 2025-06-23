@@ -26,8 +26,10 @@ for entry in "${sends[@]}"; do
     fi
 
     # Perform the send.
+    set +e
     run_indented "[sendtree] " /etc/zfsrecvd/sendtree.sh "$dataset" "$host"
     rc=$?
+    set -e
     if [[ $rc -eq 0 ]]; then
         succs+=( "$dataset@$snap -> $host" )
     else

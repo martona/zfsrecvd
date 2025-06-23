@@ -14,12 +14,14 @@ for entry in "${orchestrator[@]}"; do
     # sanity‑skip malformed lines
     [[ -z "$host" || -z "$user" ]] && continue
 
-    echo "Connecting to [$user@$host] to execute sends.sh" >&2
-    if ssh -o ConnectTimeout=10 -o BatchMode=yes "$user@$host" sudo /etc/zfsrecvd/sends.sh
-    then
+    echo "Connecting to [$user@$host] to execute sendall.sh" >&2
+    set +e
+    run_indented "  [sendall] " ssh -o ConnectTimeout=10 -o BatchMode=yes "$user@$host" sudo /etc/zfsrecvd/sendall.sh
+    rc=$?
+    set -e
+    if [[ $rc -eq 0 ]]; then
         succs+=("$host")
     else
-        rc=$?
         fails+=("$host (rc=$rc)")
         echo "ERROR: SSH connection to [$user@$host] failed" >&2
     fi    
