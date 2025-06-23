@@ -7,7 +7,8 @@
 
 CFG="/etc/zfsrecvd/zfsrecvd.conf"
 
-recv_root="" tcp_port="" tcp_addr="" allowed_hosts=() sends=() orchestrator=()
+recv_root="" tcp_port="" tcp_addr="" allowed_hosts=() sends=() 
+orchtargets=() orchec2up=()
 
 current=""
 while IFS= read -r line || [[ -n "$line" ]]; do
@@ -19,12 +20,13 @@ while IFS= read -r line || [[ -n "$line" ]]; do
         continue
     fi
     case "$current" in
-        recv-root)     recv_root="$line" ;;
-        tcp-port)      tcp_port="$line"  ;;
-        tcp-addr)      tcp_addr="$line"  ;;
-        allowed_hosts) allowed_hosts+=( "$line" ) ;;
-        sends)         sends+=( "$line" ) ;;
-        orchestrator)  orchestrator+=( "$line" ) ;;
+        recv-root)             recv_root="$line" ;;
+        tcp-port)              tcp_port="$line"  ;;
+        tcp-addr)              tcp_addr="$line"  ;;
+        allowed_hosts)         allowed_hosts+=( "$line" ) ;;
+        sends)                 sends+=( "$line" ) ;;
+        orchestrator-targets)  orchtargets+=( "$line" ) ;;
+        orchestrator-ec2up)    orchec2up+=( "$line" ) ;;
     esac
 done < "$CFG"
 
