@@ -58,5 +58,5 @@ fi
 if [[ -n "${ec2_instances_to_stop[*]}" ]]; then
     printf 'Stopping EC2 instances: \n'
     printf '  %s\n' "${ec2_instances_to_stop[@]}" >&2
-    aws ec2 stop-instances --instance-ids "${ec2_instances_to_stop[@]}"
+    aws ec2 stop-instances --instance-ids "${ec2_instances_to_stop[@]}" >/dev/null
 fi
