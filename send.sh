@@ -199,8 +199,6 @@ fi
 # Sending with -R works around this issue. We'll force this flag for volumes only.
 
 if [[ -z $SEND_RAW ]]; then
-    # If the dataset is a volume, we need to send it with -R to ensure that the
-    # properties are set correctly on the destination.
     if zfs list -H -o type "$dataset" | grep -q '^volume$'; then
         SEND_RAW="-R"
     fi
@@ -210,13 +208,13 @@ fi
 # ---------- 9.  ship the stream ---------------------------------------------
 #
 if [[ -n "$common" ]]; then
-    echo "[${dataset}@${common}] -> [${full_snap}]" >&2
+    echo "[${dataset}@${common}] -> [${remote}:${full_snap}]" >&2
     # determine size of the incremental send
     size=$( zfs send -nP $SEND_RAW -i "${dataset}@${common}" "${full_snap}" | awk '/^size/{print $2;exit}' )
     # Incremental: -w (raw), -i FROM@ TO@
     zfs send $SEND_RAW -i "${dataset}@${common}" "${full_snap}" | pv $PV_FORCE_FLAG ${size:+-s "$size"} >&${OUT}
 else
-    echo "[${full_snap}] -> [.]" >&2
+    echo "[${full_snap}] -> [${remote}]" >&2
     # determine size
     size=$( zfs send -nP $SEND_RAW "${full_snap}" 2>&1 | awk '/^size/{print $2;exit}' )
     zfs send $SEND_RAW "${full_snap}" | pv $PV_FORCE_FLAG ${size:+-s "$size"} >&${OUT}
