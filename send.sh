@@ -208,13 +208,13 @@ fi
 # ---------- 9.  ship the stream ---------------------------------------------
 #
 if [[ -n "$common" ]]; then
-    echo "[${dataset}@${common}] -> [${remote}:${full_snap}]" >&2
+    echo "[${HOSTNAME}:${dataset}@${common}] -> [${remote}:${full_snap}]" >&2
     # determine size of the incremental send
     size=$( zfs send -nP $SEND_RAW -i "${dataset}@${common}" "${full_snap}" | awk '/^size/{print $2;exit}' )
     # Incremental: -w (raw), -i FROM@ TO@
     zfs send $SEND_RAW -i "${dataset}@${common}" "${full_snap}" | pv $PV_FORCE_FLAG ${size:+-s "$size"} >&${OUT}
 else
-    echo "[${full_snap}] -> [${remote}]" >&2
+    echo "[${HOSTNAME}:${full_snap}] -> [${remote}]" >&2
     # determine size
     size=$( zfs send -nP $SEND_RAW "${full_snap}" 2>&1 | awk '/^size/{print $2;exit}' )
     zfs send $SEND_RAW "${full_snap}" | pv $PV_FORCE_FLAG ${size:+-s "$size"} >&${OUT}
