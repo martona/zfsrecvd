@@ -27,9 +27,19 @@ sentinel_file="${3:-}"   # /tmp/send-resume-status.xxxxxx  (optional)
 
 exit_script() {
     local exit_code="$1"
-    exec {OUT}>&-      || true    # close our duplicate
-    exec {NET[1]}>&-   || true    # close the original write FD from coproc
-    wait "${NET_PID}"  || true
+
+    # Close our duplicated OUT FD if it was initialized
+    if [[ -n "${OUT:-}" ]]; then
+        exec {OUT}>&- 2>/dev/null || true
+    fi
+
+    # Bash auto-unsets NET_PID and the NET array when the coproc exits naturally.
+    # We must check if they exist before referencing them to satisfy 'set -u'.
+    if [[ -n "${NET_PID:-}" ]]; then
+        exec {NET[1]}>&- 2>/dev/null || true
+        wait "${NET_PID}" 2>/dev/null || true
+    fi
+
     exit "$exit_code"
 }
 
