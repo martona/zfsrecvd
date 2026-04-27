@@ -8,7 +8,7 @@ source /etc/zfsrecvd/cfgparser.sh
 source /etc/zfsrecvd/run_indented.sh
 
 prev_ds=""
-snap="manual-$(date -u +%Y-%m-%d-%H%MZ)"
+snap="zfsrecvd-$(date -u +%Y-%m-%d-%H%MZ)"
 
 succs=()
 fails=()

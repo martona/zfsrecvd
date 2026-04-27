@@ -33,8 +33,7 @@ exit_script() {
     exit "$exit_code"
 }
 
-finalize_and_exit() {
-    local exit_code="$1"
+confirm_completion() {
     # Read the response from the server. (It ends with an empty line.)
     # We don't actually care what's in there - just making sure we don't
     # close the FDs prematurely and prevent proper log output on the other side.
@@ -45,11 +44,10 @@ finalize_and_exit() {
             fi
         else
             rc=$?
-            echo "ERROR: lost connection while confirming completion."
-            exit_script $rc
+            echo "ERROR: lost connection while confirming completion." >&2
+            exit_script "$rc"
         fi
     done
-    exit_script "$exit_code"
 }
 
 mark_resume_ok() {
@@ -138,7 +136,8 @@ if [[ -n "$resume_token" ]]; then
     if zfs send -t $token_part | pv "$PV_FORCE_FLAG" ${size:+-s "$size"} >&${OUT}; then
         echo "Resume successful." >&2
         mark_resume_ok 
-        finalize_and_exit 0
+        confirm_completion
+        exit_script 0
     else
         rc=$?
         echo "ERROR: resume failed with rc=$rc" >&2
@@ -221,4 +220,21 @@ else
 fi
 #echo "Send successful." >&2
 
-finalize_and_exit 0
+confirm_completion
+
+#
+# ---------- 10. prune old local snapshots -----------------------------------
+#
+keep_count=6
+total_snaps=${#local_all[@]}
+
+if (( total_snaps > keep_count )); then
+    destroy_count=$(( total_snaps - keep_count ))
+    for snap in "${local_all[@]:0:$destroy_count}"; do
+        if ! zfs destroy "$snap"; then
+            echo "WARNING: failed to prune old local snapshot: $snap" >&2
+        fi
+    done
+fi
+
+exit_script 0

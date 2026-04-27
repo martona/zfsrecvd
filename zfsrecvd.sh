@@ -108,3 +108,25 @@ echo "Receiving: $dataset_with_snap" >&2
 /sbin/zfs recv -s -u -F -e -x canmount "$dest_parent"
 echo "Successfully completed: $dataset_with_snap" >&2
 printf 'DONE\n\n'
+
+# ---- 6. prune old snapshots ------------------------------------------
+#
+target_ds="${dest_base}/${dataset}"
+mapfile -t remote_all < <(
+    # Get all snapshots for the newly updated dataset, oldest first
+    zfs list -H -o name -t snapshot -s creation "$target_ds" 2>/dev/null || true
+)
+
+keep_count=6
+total_snaps=${#remote_all[@]}
+
+if (( total_snaps > keep_count )); then
+    destroy_count=$(( total_snaps - keep_count ))
+    
+    for snap in "${remote_all[@]:0:$destroy_count}"; do
+        echo "Pruning old remote snapshot: $snap" >&2
+        if ! zfs destroy "$snap"; then
+            echo "WARNING: failed to prune old snapshot: $snap" >&2
+        fi
+    done
+fi
