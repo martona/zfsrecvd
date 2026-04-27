@@ -97,7 +97,7 @@ zfs create -p "$dest_parent" 2>/dev/null || true
 # List any existing snapshots for the exact dataset path.
 # Respond with this to client.
 echo "Listing existing snapshots for: ${dest_base}/$dataset" >&2
-zfs list -H -o name -t snapshot "${dest_base}/${dataset}" 2>/dev/null | awk 'NF==1 {printf "SNAPSHOT: %s\n", $1}' | tee /dev/stderr || true
+zfs list -H -o name -t snapshot -d 1 "${dest_base}/${dataset}" 2>/dev/null | awk 'NF==1 {printf "SNAPSHOT: %s\n", $1}' | tee /dev/stderr || true
 # Complete the list with a single empty line.
 echo
 
@@ -114,7 +114,7 @@ printf 'DONE\n\n'
 target_ds="${dest_base}/${dataset}"
 mapfile -t remote_all < <(
     # Get all snapshots for the newly updated dataset, oldest first
-    zfs list -H -o name -t snapshot -s creation "$target_ds" 2>/dev/null || true
+    zfs list -H -o name -t snapshot -d 1 -s creation "$target_ds" 2>/dev/null || true
 )
 
 keep_count=6

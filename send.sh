@@ -157,7 +157,7 @@ fi
 # ---------- 7.  build list of local snaps older than target ------------------
 #
 mapfile -t local_all < <(
-    zfs list -H -o name -t snapshot -s creation "${dataset}"
+    zfs list -H -o name -t snapshot -d 1 -s creation "${dataset}"
 )
 
 local_prior=()
