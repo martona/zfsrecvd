@@ -107,7 +107,6 @@ echo
 echo "Receiving: $dataset_with_snap" >&2
 /sbin/zfs recv -s -u -F -e -x canmount "$dest_parent"
 echo "Successfully completed: $dataset_with_snap" >&2
-printf 'DONE\n\n'
 
 # ---- 6. prune old snapshots ------------------------------------------
 #
@@ -130,3 +129,7 @@ if (( total_snaps > keep_count )); then
         fi
     done
 fi
+
+# ---- 7. terminate ------------------------------------------
+#
+printf 'DONE\n\n'
