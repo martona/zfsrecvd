@@ -236,11 +236,18 @@ confirm_completion
 # ---------- 10. prune old local snapshots -----------------------------------
 #
 keep_count=6
-total_snaps=${#local_all[@]}
+prunable_local=()
+for snap in "${local_all[@]}"; do
+    snap_name="${snap#*@}"
+    if [[ "$snap_name" == manual-* || "$snap_name" == zfsrecvd-* ]]; then
+        prunable_local+=("$snap")
+    fi
+done
 
+total_snaps=${#prunable_local[@]}
 if (( total_snaps > keep_count )); then
     destroy_count=$(( total_snaps - keep_count ))
-    for snap in "${local_all[@]:0:$destroy_count}"; do
+    for snap in "${prunable_local[@]:0:$destroy_count}"; do
         if ! zfs destroy "$snap"; then
             echo "WARNING: failed to prune old local snapshot: $snap" >&2
         fi

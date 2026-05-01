@@ -117,12 +117,19 @@ mapfile -t remote_all < <(
 )
 
 keep_count=6
-total_snaps=${#remote_all[@]}
+prunable_remote=()
+for snap in "${remote_all[@]}"; do
+    snap_name="${snap#*@}"
+    if [[ "$snap_name" == manual-* || "$snap_name" == zfsrecvd-* ]]; then
+        prunable_remote+=("$snap")
+    fi
+done
 
+total_snaps=${#prunable_remote[@]}
 if (( total_snaps > keep_count )); then
     destroy_count=$(( total_snaps - keep_count ))
-    
-    for snap in "${remote_all[@]:0:$destroy_count}"; do
+
+    for snap in "${prunable_remote[@]:0:$destroy_count}"; do
         echo "Pruning old remote snapshot: $snap" >&2
         if ! zfs destroy "$snap"; then
             echo "WARNING: failed to prune old snapshot: $snap" >&2
