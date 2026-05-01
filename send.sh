@@ -214,23 +214,26 @@ if [[ -z $SEND_RAW ]]; then
 fi
 
 #
-# ---------- 9.  ship the stream ---------------------------------------------
+# ---------- 10.  ship the stream ---------------------------------------------
 #
 if [[ -n "$common" ]]; then
     echo "[${HOSTNAME}:${dataset}@${common}] -> [${remote}:${full_snap}]" >&2
     # determine size of the incremental send
-    size=$( zfs send -nP $SEND_RAW -i "${dataset}@${common}" "${full_snap}" | awk '/^size/{print $2;exit}' )
+    size=$( zfs send -nP $SEND_RAW -I "${dataset}@${common}" "${full_snap}" | awk '/^size/{print $2;exit}' )
     # Incremental: -w (raw), -i FROM@ TO@
-    zfs send $SEND_RAW -i "${dataset}@${common}" "${full_snap}" | pv $PV_FORCE_FLAG ${size:+-s "$size"} >&${OUT}
+    zfs send $SEND_RAW -I "${dataset}@${common}" "${full_snap}" | pv $PV_FORCE_FLAG ${size:+-s "$size"} >&${OUT}
 else
-    # No common snapshot on destination. If there are older local snapshots,
-    # send an "initial + intermediates" stream in one go so the destination
-    # receives full history up to the target snapshot.
-    if [[ ${#local_prior[@]} -gt 0 ]]; then
+    # Bootstrap path: destination has no common snapshot. If older local snapshots
+    # exist, first seed the destination with the oldest one, then ask sendtree
+    # to call us again so we can immediately perform a normal incremental send.
+    if [[ ${#remote_snaps[@]} -eq 0 && ${#local_prior[@]} -gt 0 ]]; then
         base="${dataset}@${local_prior[0]}"
-        echo "[${HOSTNAME}:${base}..${full_snap}] -> [${remote}]" >&2
-        size=$( zfs send -nP $SEND_RAW -I "$base" "${full_snap}" 2>&1 | awk '/^size/{print $2;exit}' )
-        zfs send $SEND_RAW -I "$base" "${full_snap}" | pv $PV_FORCE_FLAG ${size:+-s "$size"} >&${OUT}
+        echo "[${HOSTNAME}:${base}] -> [${remote}] (bootstrap)" >&2
+        size=$( zfs send -nP $SEND_RAW "$base" 2>&1 | awk '/^size/{print $2;exit}' )
+        zfs send $SEND_RAW "$base" | pv $PV_FORCE_FLAG ${size:+-s "$size"} >&${OUT}
+        mark_resume_ok
+        confirm_completion
+        exit_script 0
     else
         echo "[${HOSTNAME}:${full_snap}] -> [${remote}]" >&2
         # determine size
@@ -243,7 +246,7 @@ fi
 confirm_completion
 
 #
-# ---------- 10. prune old local snapshots -----------------------------------
+# ---------- 11. prune old local snapshots -----------------------------------
 #
 keep_count=6
 prunable_local=()
