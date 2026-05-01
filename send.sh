@@ -223,10 +223,20 @@ if [[ -n "$common" ]]; then
     # Incremental: -w (raw), -i FROM@ TO@
     zfs send $SEND_RAW -i "${dataset}@${common}" "${full_snap}" | pv $PV_FORCE_FLAG ${size:+-s "$size"} >&${OUT}
 else
-    echo "[${HOSTNAME}:${full_snap}] -> [${remote}]" >&2
-    # determine size
-    size=$( zfs send -nP $SEND_RAW "${full_snap}" 2>&1 | awk '/^size/{print $2;exit}' )
-    zfs send $SEND_RAW "${full_snap}" | pv $PV_FORCE_FLAG ${size:+-s "$size"} >&${OUT}
+    # No common snapshot on destination. If there are older local snapshots,
+    # send an "initial + intermediates" stream in one go so the destination
+    # receives full history up to the target snapshot.
+    if [[ ${#local_prior[@]} -gt 0 ]]; then
+        base="${dataset}@${local_prior[0]}"
+        echo "[${HOSTNAME}:${base}..${full_snap}] -> [${remote}]" >&2
+        size=$( zfs send -nP $SEND_RAW -I "$base" "${full_snap}" 2>&1 | awk '/^size/{print $2;exit}' )
+        zfs send $SEND_RAW -I "$base" "${full_snap}" | pv $PV_FORCE_FLAG ${size:+-s "$size"} >&${OUT}
+    else
+        echo "[${HOSTNAME}:${full_snap}] -> [${remote}]" >&2
+        # determine size
+        size=$( zfs send -nP $SEND_RAW "${full_snap}" 2>&1 | awk '/^size/{print $2;exit}' )
+        zfs send $SEND_RAW "${full_snap}" | pv $PV_FORCE_FLAG ${size:+-s "$size"} >&${OUT}
+    fi
 fi
 #echo "Send successful." >&2
 
