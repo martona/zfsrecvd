@@ -21,9 +21,11 @@ fi
 chmod 755 /etc/zfsrecvd/*.sh
 
 echo "Files copied. Edit /etc/zfsrecvd/zfsrecvd.conf to configure the service."
-echo 
+echo
 echo "Provide certificates in /etc/zfsrecvd/{server,client}.pem and .key"
 echo "Provide public part of CA certificate in /etc/zfsrecvd/ca.pem"
 echo "Execute the following command to enable the service:"
 echo
 echo "systemctl enable --now zfsrecvd.service"
+echo
+echo "Don't forget to install socat and pv."
