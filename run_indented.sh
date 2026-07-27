@@ -10,11 +10,17 @@
 # transfer ends, which is why an earlier version of this appeared to produce
 # no output at all.
 #
+# ZFSRECVD_INDENT tells descendants how many columns of prefix will be glued
+# onto their lines: anything that sizes output to the terminal width (pv, see
+# send.sh) must shrink by that amount, or the line exceeds the terminal
+# width, wraps, and \r-refreshes land on fresh rows instead of overwriting.
+#
 # Returns the command's exit status, not the pipeline's.
 
 if command -v gawk >/dev/null 2>&1; then
     run_indented() {
         local prefix=$1; shift
+        ZFSRECVD_INDENT=$(( ${ZFSRECVD_INDENT:-0} + ${#prefix} )) \
         "$@" 2>&1 | gawk -v p="$prefix" '
             BEGIN       { RS = "[\r\n]"; ORS = "" }
             { printf "%s%s%s", p, $0, RT; fflush() }

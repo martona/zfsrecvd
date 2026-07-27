@@ -18,6 +18,19 @@
 set -euo pipefail
 source /etc/zfsrecvd/cfgparser.sh
 
+# When we run under run_indented (see sendall.sh), every line we emit grows
+# by ZFSRECVD_INDENT columns of prefix before reaching the terminal. pv sizes
+# its progress line to the terminal width (or assumes 80 when it can't tell),
+# so an unshrunk line wraps once prefixed, and every \r-refresh then lands on
+# a fresh row instead of overwriting in place. Shrink pv to compensate.
+PV_WIDTH_FLAG=""
+if [[ "${ZFSRECVD_INDENT:-0}" -gt 0 ]]; then
+    cols=$(stty size </dev/tty 2>/dev/null | awk '{print $2}') || true
+    if [[ -n "${cols:-}" && "$cols" -gt $(( ${ZFSRECVD_INDENT:-0} + 20 )) ]]; then
+        PV_WIDTH_FLAG="-w $(( cols - ${ZFSRECVD_INDENT:-0} - 1 ))"
+    fi
+fi
+
 #
 # ---------- 0.  arguments ----------------------------------------------------
 #
@@ -29,6 +42,14 @@ fi
 full_snap="$1"           # tank/ds@snap
 remote="$2"              # DNS name or IP of zfsrecvd listener
 sentinel_file="${3:-}"   # /tmp/send-resume-status.xxxxxx  (optional)
+
+# Under run_indented (orchestrated runs) the line prefix already names both
+# ends, so announce lines stay terse. On a bare manual run there is no
+# prefix; append the destination for context.
+dest_tag=""
+if [[ "${ZFSRECVD_INDENT:-0}" -eq 0 ]]; then
+    dest_tag=" -> [${remote}]"
+fi
 
 exit_script() {
     local exit_code="$1"
@@ -159,7 +180,7 @@ if [[ -n "$resume_token" ]]; then
     token_part="${token_part//[^a-zA-Z0-9-]/}"   
     echo "Resuming from token." >&2
     size=$( zfs send -nP -t "$token_part" | awk '/^size/{print $2;exit}' )
-    if zfs send -t $token_part | pv $PV_FORCE_FLAG ${size:+-s "$size"} >&${OUT}; then
+    if zfs send -t $token_part | pv $PV_FORCE_FLAG $PV_WIDTH_FLAG ${size:+-s "$size"} >&${OUT}; then
         echo "Resume successful." >&2
         mark_resume_ok 
         confirm_completion
@@ -233,28 +254,28 @@ fi
 # ---------- 10.  ship the stream ---------------------------------------------
 #
 if [[ -n "$common" ]]; then
-    echo "[${HOSTNAME}:${dataset}@${common}] -> [${remote}:${full_snap}]" >&2
+    echo "${dataset}@${common} => @${snapname}${dest_tag}" >&2
     # determine size of the incremental send
     size=$( zfs send -nP $SEND_RAW -I "${dataset}@${common}" "${full_snap}" | awk '/^size/{print $2;exit}' )
     # Incremental: -w (raw), -i FROM@ TO@
-    zfs send $SEND_RAW -I "${dataset}@${common}" "${full_snap}" | pv $PV_FORCE_FLAG ${size:+-s "$size"} >&${OUT}
+    zfs send $SEND_RAW -I "${dataset}@${common}" "${full_snap}" | pv $PV_FORCE_FLAG $PV_WIDTH_FLAG ${size:+-s "$size"} >&${OUT}
 else
     # Bootstrap path: destination has no common snapshot. If older local snapshots
     # exist, first seed the destination with the oldest one, then ask sendtree
     # to call us again so we can immediately perform a normal incremental send.
     if [[ ${#remote_snaps[@]} -eq 0 && ${#local_prior[@]} -gt 0 ]]; then
         base="${dataset}@${local_prior[0]}"
-        echo "[${HOSTNAME}:${base}] -> [${remote}] (bootstrap)" >&2
+        echo "${base} (bootstrap)${dest_tag}" >&2
         size=$( zfs send -nP $SEND_RAW "$base" 2>&1 | awk '/^size/{print $2;exit}' )
-        zfs send $SEND_RAW "$base" | pv $PV_FORCE_FLAG ${size:+-s "$size"} >&${OUT}
+        zfs send $SEND_RAW "$base" | pv $PV_FORCE_FLAG $PV_WIDTH_FLAG ${size:+-s "$size"} >&${OUT}
         mark_resume_ok
         confirm_completion
         exit_script 0
     else
-        echo "[${HOSTNAME}:${full_snap}] -> [${remote}]" >&2
+        echo "${full_snap} (full send)${dest_tag}" >&2
         # determine size
         size=$( zfs send -nP $SEND_RAW "${full_snap}" 2>&1 | awk '/^size/{print $2;exit}' )
-        zfs send $SEND_RAW "${full_snap}" | pv $PV_FORCE_FLAG ${size:+-s "$size"} >&${OUT}
+        zfs send $SEND_RAW "${full_snap}" | pv $PV_FORCE_FLAG $PV_WIDTH_FLAG ${size:+-s "$size"} >&${OUT}
     fi
 fi
 #echo "Send successful." >&2

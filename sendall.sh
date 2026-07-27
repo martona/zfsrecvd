@@ -49,9 +49,10 @@ for entry in "${sends[@]}"; do
         continue
     fi
 
-    # Perform the send.
+    # Perform the send. This is the only prefixing layer: the prefix names
+    # both ends, so nothing else needs to tag the stream again upstream.
     set +e
-    run_indented "[->$host] " /etc/zfsrecvd/sendtree.sh "$dataset" "$host"
+    run_indented "[${HOSTNAME}]>[${host}] " /etc/zfsrecvd/sendtree.sh "$dataset" "$host"
     rc=$?
     set -e
     if [[ $rc -eq 0 ]]; then

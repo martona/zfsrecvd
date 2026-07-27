@@ -56,6 +56,10 @@ EOF
 sudo sysctl --system
 ```
 
+## Updating
+
+When iterating on the scripts: `git pull`, run `install.sh` to refresh this host, then run `/etc/zfsrecvd/deploy.sh` to push the scripts (and only the scripts — never certs or config) to every host named in the config: `[orchestrator-targets]` (as the listed user), plus `[sends]` destinations and `[allowed_hosts]` (as the current user), deduped. Targets need passwordless sudo for the connecting user, same as orchestrated runs. EC2 instances in `[orchestrator-ec2up]` are woken for the deploy and stopped after; a target with an active recv listener gets it restarted so the new code takes effect.
+
 ## Uninstall
 
 Just undo the above.

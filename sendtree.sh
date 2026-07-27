@@ -15,7 +15,6 @@
 
 set -euo pipefail
 source /etc/zfsrecvd/cfgparser.sh
-source /etc/zfsrecvd/run_indented.sh
 #
 # ---------- 0.  arguments ----------------------------------------------------
 #
@@ -56,7 +55,7 @@ while read -r ds; do
             echo "    Retrying [$ds$snapname] to [$remote] (attempt $retry/$max_retries)" >&2
         fi
         set +e
-        run_indented "[send] " /etc/zfsrecvd/send.sh "$ds$snapname" "$remote" "$sentinel"
+        /etc/zfsrecvd/send.sh "$ds$snapname" "$remote" "$sentinel"
         rc=$?
         set -e
         if [[ $rc -eq 0 ]]; then
