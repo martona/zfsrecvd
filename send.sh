@@ -113,7 +113,7 @@ snapname="${full_snap#*@}"    # snap
 #
 coproc NET {
 exec socat \
--b 262144
+-b 262144 \
 STDIO \
 OPENSSL:"${remote}":"$tcp_port",\
 connect-timeout=10,\
