@@ -10,7 +10,7 @@ exec /usr/bin/socat \
 -b 262144 \
 OPENSSL-LISTEN:"$tcp_port",bind="$tcp_addr",\
 reuseaddr,fork,max-children=16,\
-nodelay, \
+nodelay,\
 so-keepalive,\
 cert=/etc/zfsrecvd/server.pem,\
 key=/etc/zfsrecvd/server.key,\
