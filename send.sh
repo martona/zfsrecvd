@@ -113,10 +113,12 @@ snapname="${full_snap#*@}"    # snap
 #
 coproc NET {
 exec socat \
+-b 262144
 STDIO \
 OPENSSL:"${remote}":"$tcp_port",\
 connect-timeout=10,\
 so-keepalive,\
+nodelay,
 cert=/etc/zfsrecvd/client.pem,\
 key=/etc/zfsrecvd/client.key,\
 cafile=/etc/zfsrecvd/ca.pem,\
