@@ -9,6 +9,11 @@
 #   * /etc/zfsrecvd/{client.pem,client.key,ca.pem}
 #   * socat with OpenSSL support
 #   * ZFS 0.8+ (for raw send)
+#
+# Exit codes:
+#   0    sent, resumed, or already up to date
+#   111  no session: could not connect / TLS failed / receiver never replied
+#   *    anything else went wrong; see stderr
 
 set -euo pipefail
 source /etc/zfsrecvd/cfgparser.sh
@@ -89,6 +94,8 @@ coproc NET {
 exec socat \
 STDIO \
 OPENSSL:"${remote}":"$tcp_port",\
+connect-timeout=10,\
+so-keepalive,\
 cert=/etc/zfsrecvd/client.pem,\
 key=/etc/zfsrecvd/client.key,\
 cafile=/etc/zfsrecvd/ca.pem,\
@@ -102,7 +109,7 @@ exec  {IN}<&"${NET[0]}"   # read‑end from server
 #
 # ---------- 3.  send header --------------------------------------------------
 #
-printf 'zfsrecvd1.1\n%s\n\n' "${full_snap}" >&${OUT}
+printf 'zfsrecvd1.1\n%s\n\n' "${full_snap}" >&${OUT} || exit_script 111
 
 #
 # ---------- 4.  receive remote snapshot list --------------------------------
@@ -110,8 +117,10 @@ printf 'zfsrecvd1.1\n%s\n\n' "${full_snap}" >&${OUT}
 remote_snaps=()
 resume_token=""
 already_there=false
+got_reply=false
 while true; do
     if IFS= read -r -u "${IN}" line; then
+        got_reply=true
         if [[ -z $line ]]; then                  # blank line => list finished
             break
         fi
@@ -129,6 +138,13 @@ while true; do
         fi
     else
         rc=$?
+        if ! $got_reply; then
+            # Not a single byte came back: connect/TLS failed, or the receiver
+            # rejected us outright. Exit 111 so sendtree.sh knows the rest of
+            # the tree would fail the same way.
+            echo "ERROR: could not establish session with [${remote}:${tcp_port}]" >&2
+            exit_script 111
+        fi
         echo "ERROR: lost connection while receiving snapshot list (read rc=$rc)" >&2
         exit_script "$rc"
     fi
@@ -143,7 +159,7 @@ if [[ -n "$resume_token" ]]; then
     token_part="${token_part//[^a-zA-Z0-9-]/}"   
     echo "Resuming from token." >&2
     size=$( zfs send -nP -t "$token_part" | awk '/^size/{print $2;exit}' )
-    if zfs send -t $token_part | pv "$PV_FORCE_FLAG" ${size:+-s "$size"} >&${OUT}; then
+    if zfs send -t $token_part | pv $PV_FORCE_FLAG ${size:+-s "$size"} >&${OUT}; then
         echo "Resume successful." >&2
         mark_resume_ok 
         confirm_completion
@@ -248,13 +264,16 @@ confirm_completion
 #
 # ---------- 11. prune old local snapshots -----------------------------------
 #
-keep_count=6
+# keep_count and prune_prefixes come from zfsrecvd.conf (via cfgparser.sh).
 prunable_local=()
 for snap in "${local_all[@]}"; do
     snap_name="${snap#*@}"
-    if [[ "$snap_name" == manual-* || "$snap_name" == zfsrecvd-* ]]; then
-        prunable_local+=("$snap")
-    fi
+    for prefix in "${prune_prefixes[@]}"; do
+        if [[ "$snap_name" == "$prefix"* ]]; then
+            prunable_local+=("$snap")
+            break
+        fi
+    done
 done
 
 total_snaps=${#prunable_local[@]}

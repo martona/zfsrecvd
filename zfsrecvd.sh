@@ -116,13 +116,16 @@ mapfile -t remote_all < <(
     zfs list -H -o name -t snapshot -d 1 -s creation "$target_ds" 2>/dev/null || true
 )
 
-keep_count=6
+# keep_count and prune_prefixes come from zfsrecvd.conf (via cfgparser.sh).
 prunable_remote=()
 for snap in "${remote_all[@]}"; do
     snap_name="${snap#*@}"
-    if [[ "$snap_name" == manual-* || "$snap_name" == zfsrecvd-* ]]; then
-        prunable_remote+=("$snap")
-    fi
+    for prefix in "${prune_prefixes[@]}"; do
+        if [[ "$snap_name" == "$prefix"* ]]; then
+            prunable_remote+=("$snap")
+            break
+        fi
+    done
 done
 
 total_snaps=${#prunable_remote[@]}

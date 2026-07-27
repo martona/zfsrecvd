@@ -28,4 +28,4 @@ echo "Execute the following command to enable the service:"
 echo
 echo "systemctl enable --now zfsrecvd.service"
 echo
-echo "Don't forget to install socat and pv."
+echo "Don't forget to install socat, pv and gawk."

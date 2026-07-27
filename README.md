@@ -19,6 +19,7 @@ Requirements:
 pv
 zfsutils-linux
 socat
+gawk
 ```
 
 The setup also assumes systemd.

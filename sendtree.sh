@@ -9,6 +9,9 @@
 #   * /etc/zfsrecvd/{client.pem,client.key,ca.pem}
 #   * socat with OpenSSL support
 #   * ZFS 0.8+ (for raw send)
+#
+# Exit: 0 all datasets sent, 2 some datasets failed, 3 no session to the
+#       receiver could be established (remaining datasets were skipped).
 
 set -euo pipefail
 source /etc/zfsrecvd/cfgparser.sh
@@ -39,6 +42,8 @@ sentinel=$(mktemp)
 #
 # ---------- 1.  walk list, send each entry -----------------------------------
 #
+failed=()
+unreachable=false
 while read -r ds; do
     retry=0
     max_retries=5
@@ -66,14 +71,34 @@ while read -r ds; do
         fi
     done
     if [[ $rc -ne 0 ]]; then
+        if [[ $rc -eq 111 ]]; then
+            # send.sh never got a reply from the receiver: it's down, or we
+            # aren't welcome. Either way the remaining datasets would fail the
+            # same slow way, so give up on the whole tree.
+            echo "ERROR: no session to [$remote]; skipping remaining datasets of [$dataset]" >&2
+            failed+=( "$ds$snapname (no session)" )
+            unreachable=true
+            break
+        fi
         echo "ERROR: Failed to send [$ds$snapname] to [$remote] (rc=$rc)" >&2
         echo "Check the logs on the remote host for more details." >&2
-        exit $rc
+        failed+=( "$ds$snapname (rc=$rc)" )
     fi
 done < <(zfs list -r -H -o name -t filesystem,volume "$dataset")
 
 #
-# ---------- 2.  cleanup ------------------------------------------------------
+# ---------- 2.  report + cleanup ---------------------------------------------
 #
 
 rm -f -- "$sentinel"
+
+if [[ ${#failed[@]} -gt 0 ]]; then
+    echo "Failed datasets for [$remote]:" >&2
+    printf '  %s\n' "${failed[@]}" >&2
+fi
+if $unreachable; then
+    exit 3
+fi
+if [[ ${#failed[@]} -gt 0 ]]; then
+    exit 2
+fi
