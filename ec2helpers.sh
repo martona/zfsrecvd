@@ -1,16 +1,41 @@
 #!/usr/bin/env bash
-# Shared EC2 wake/stop logic for orchestrate.sh and deploy.sh.
-# Source this after cfgparser.sh (it needs $orchec2up), then call
-# ec2_maybe_start once. Instances it starts -- plus any debt a crashed
-# earlier run left behind -- are stopped by an EXIT trap it installs.
+# Shared helpers for orchestrate.sh and deploy.sh: the estate lock, and the
+# EC2 wake/stop logic.
+# Source this after cfgparser.sh. Call orch_lock to take the shared lock,
+# and ec2_maybe_start once to wake the fleet; instances it starts -- plus
+# any debt a crashed earlier run left behind -- are stopped by an EXIT trap
+# it installs.
+
+# Take the lock shared by orchestrate.sh and deploy.sh: swapping scripts
+# under a run in flight would mix script generations within one run, so the
+# two exclude each other. The file is chmod 666 so root-run and user-run
+# invocations contend on the same lock instead of locking each other out.
+orch_lock() {
+    local lock_file="${ZFSRECVD_LOCK_FILE:-/run/lock/zfsrecvd-orchestrate.lock}"
+    # Probe with a normal redirection first: a failed exec redirection would
+    # abort the script with a bare "Permission denied" instead of this hint.
+    if ! : 2>/dev/null >> "$lock_file"; then
+        echo "ERROR: cannot open $lock_file (left behind by a run as another user?)." >&2
+        echo "Remove it once with: sudo rm -f $lock_file" >&2
+        exit 1
+    fi
+    chmod 666 "$lock_file" 2>/dev/null || true
+    exec {orch_lock_fd}>>"$lock_file"
+    if ! flock -n "$orch_lock_fd"; then
+        echo "ERROR: another orchestrate or deploy run is already in progress." >&2
+        exit 75
+    fi
+}
 
 ec2_instances_to_stop=()
 
 # Instances we start are recorded on disk so that a crashed run's instances
 # still get stopped by a later run. (The PreviousState filter below would
 # otherwise consider them "already running" forever and never stop them.)
+# The -w check matters: mkdir -p succeeds on an existing root-owned dir even
+# when we can't write into it.
 ec2_state_dir="/var/lib/zfsrecvd"
-if ! mkdir -p "$ec2_state_dir" 2>/dev/null; then
+if ! mkdir -p "$ec2_state_dir" 2>/dev/null || [[ ! -w "$ec2_state_dir" ]]; then
     ec2_state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/zfsrecvd"
     mkdir -p "$ec2_state_dir"
 fi

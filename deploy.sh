@@ -23,12 +23,14 @@ set -euo pipefail
 source /etc/zfsrecvd/cfgparser.sh
 source /etc/zfsrecvd/ec2helpers.sh
 
-# Deploys and orchestrated runs exclude each other: swapping scripts under
-# a run in flight would mix script generations within one run.
-exec {lock_fd}>/run/lock/zfsrecvd-orchestrate.lock
-if ! flock -n "$lock_fd"; then
-    echo "ERROR: an orchestrate or deploy run is already in progress." >&2
-    exit 75
+# One orchestrate/deploy at a time across the estate.
+orch_lock
+
+# Running under sudo makes ssh use root's keys and known_hosts, which is a
+# common source of baffling auth/host-key failures. Root is not needed here.
+if [[ ${EUID} -eq 0 && -n "${SUDO_USER:-}" ]]; then
+    echo "WARNING: running under sudo; ssh will use root's keys and known_hosts." >&2
+    echo "deploy.sh does not need root -- run it as your own user." >&2
 fi
 
 src_dir="/etc/zfsrecvd"
@@ -55,7 +57,8 @@ done
 #
 # ---------- 1.  collect deploy targets ---------------------------------------
 #
-me="$(id -un)"
+# Fall back to the invoking user even under sudo, not to root.
+me="${SUDO_USER:-$(id -un)}"
 declare -A target_user=()
 targets=()                     # first-seen order
 
@@ -96,8 +99,12 @@ ec2_maybe_start
 # --unlink-first so a script that is being executed right now (e.g. the
 # listener's zfsrecvd.sh) is replaced via a fresh inode, never truncated
 # under a running interpreter.
+# daemon-reload clears the "unit file changed on disk" nag that a prior
+# install.sh run leaves behind; it is cheap and safe on hosts without the
+# service too.
 remote_cmd='sudo -n mkdir -p /etc/zfsrecvd \
   && sudo -n tar -C /etc/zfsrecvd --unlink-first -xf - \
+  && sudo -n systemctl daemon-reload \
   && if systemctl is-active --quiet zfsrecvd.service; then
          sudo -n systemctl restart zfsrecvd.service && echo "    listener restarted"
      fi'
@@ -108,8 +115,10 @@ for host in "${targets[@]}"; do
     user="${target_user[$host]}"
     echo "Deploying to [$user@$host]" >&2
     set +e
+    # accept-new: trust a host on first contact, so adding a brand-new box
+    # to the config just works; a changed key on a known host still fails.
     tar -C "$src_dir" -cf - "${scripts[@]}" \
-        | ssh -o ConnectTimeout=10 -o BatchMode=yes "$user@$host" "$remote_cmd"
+        | ssh -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$user@$host" "$remote_cmd"
     rc=$?
     set -e
     if [[ $rc -eq 0 ]]; then

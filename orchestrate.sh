@@ -11,12 +11,8 @@ set -euo pipefail
 source /etc/zfsrecvd/cfgparser.sh
 source /etc/zfsrecvd/ec2helpers.sh
 
-# One orchestrated run at a time.
-exec {lock_fd}>/run/lock/zfsrecvd-orchestrate.lock
-if ! flock -n "$lock_fd"; then
-    echo "ERROR: another orchestrate run is already in progress." >&2
-    exit 75
-fi
+# One orchestrate/deploy at a time across the estate.
+orch_lock
 
 succs=()
 partials=()

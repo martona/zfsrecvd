@@ -15,6 +15,7 @@ cp "$SCRIPT_DIR/listen.sh"        /etc/zfsrecvd/
 cp "$SCRIPT_DIR/zfsrecvd.sh"      /etc/zfsrecvd/
 cp "$SCRIPT_DIR/run_indented.sh"  /etc/zfsrecvd/
 cp "$SCRIPT_DIR/zfsrecvd.service" /etc/systemd/system/zfsrecvd.service
+systemctl daemon-reload 2>/dev/null || true
 
 if [[ ! -f /etc/zfsrecvd/zfsrecvd.conf ]]; then
     cp "$SCRIPT_DIR/zfsrecvd.conf" /etc/zfsrecvd/zfsrecvd.conf
