@@ -3,10 +3,9 @@
 #   Use /etc/zfsrecvd/zfsrecvd.conf to configure.
 #
 # Hosts run in parallel. Output modes:
-#   * interactive (stderr is a tty): docker-style live board, two lines
-#     per host (current dataset, current progress) repainted in place;
-#     full per-host output goes to log files, and failing hosts get their
-#     log tail dumped at the end.
+#   * interactive (stderr is a tty): docker-style live board, one status
+#     line per host repainted in place; full per-host output goes to log
+#     files, and failing hosts get their log tail dumped at the end.
 #   * headless: plain parallel, line-interleaved output (each line already
 #     carries its [host]>[dest] prefix from the remote side).
 #   * --serial: the old one-host-at-a-time mode with full scrolling output.
@@ -59,23 +58,11 @@ record_result() {
     esac
 }
 
-# Split the tail of a log into the current context line (POLL_TOP: dataset
-# announce, retry notice, whatever came last that isn't progress) and the
-# current pv record (POLL_BOT, recognized by its "B/s" rate field). A new
-# context line resets the progress slot, so a fresh dataset never shows the
-# previous dataset's leftover bar. Records are separated by \r or \n.
-poll_log() {
-    POLL_TOP="" POLL_BOT=""
-    local rec
-    while IFS= read -r rec; do
-        [[ -z "${rec//[[:space:]]/}" ]] && continue
-        if [[ $rec == *B/s* ]]; then
-            POLL_BOT="$rec"
-        else
-            POLL_TOP="$rec"
-            POLL_BOT=""
-        fi
-    done < <(tail -c 4096 "$1" 2>/dev/null | tr '\r' '\n')
+# Last visual record of a log: pv separates in-place updates with \r, so
+# split on both \r and \n and take the final non-blank record -- exactly
+# what the bottom line of a serial terminal would be showing.
+latest_line() {
+    tail -c 4096 "$1" 2>/dev/null | tr '\r' '\n' | grep -v '^[[:space:]]*$' | tail -n 1 || true
 }
 
 # Re-pad "[host]>[rest]" so the ">" column lines up across the board.
@@ -153,8 +140,8 @@ run_parallel_live() {
     local n=${#hosts[@]}
     local rows
     rows=$(tput lines 2>/dev/null) || rows=50
-    if (( n * 2 + 3 > rows )); then
-        echo "NOTE: terminal too short for the live board (${n} hosts x 2 lines); using plain output." >&2
+    if (( n + 3 > rows )); then
+        echo "NOTE: terminal too short for the live board (${n} hosts); using plain output." >&2
         run_parallel_plain
         return
     fi
@@ -166,7 +153,7 @@ run_parallel_live() {
     done
 
     local c_run=$'\e[36m' c_ok=$'\e[32m' c_warn=$'\e[33m' c_err=$'\e[31m' c_off=$'\e[0m'
-    local rcs=() finished=() statuses=() tops=() bots=()
+    local rcs=() finished=() statuses=() lines=()
 
     local cols prev_cols
     cols=$(tput cols 2>/dev/null) || cols=120
@@ -186,13 +173,12 @@ run_parallel_live() {
         rcs[i]=0
         finished[i]=0
         statuses[i]="${c_run}▸${c_off}"
-        tops[i]="connecting to [${users[i]}@${hosts[i]}]..."
-        bots[i]=""
-        printf '\n\n' >&2
+        lines[i]="connecting to [${users[i]}@${hosts[i]}]..."
+        printf '\n' >&2
     done
 
     tput civis 2>/dev/null || true
-    local running
+    local running content
     while :; do
         running=0
         for ((i = 0; i < n; i++)); do
@@ -212,11 +198,8 @@ run_parallel_live() {
                         *)  statuses[i]="${c_err}✖${c_off}" ;;
                     esac
                 fi
-                poll_log "$logdir/${hosts[i]}.log"
-                [[ -n "$POLL_TOP" ]] && tops[i]="$POLL_TOP"
-                if [[ -n "$POLL_TOP" || -n "$POLL_BOT" ]]; then
-                    bots[i]="$POLL_BOT"
-                fi
+                content=$(latest_line "$logdir/${hosts[i]}.log")
+                [[ -n "$content" ]] && lines[i]="$content"
             fi
         done
 
@@ -225,14 +208,12 @@ run_parallel_live() {
             # Width changed: the old region may have rewrapped, making the
             # cursor-up arithmetic lie. Abandon it and re-anchor below.
             prev_cols=$cols
-            for ((i = 0; i < n * 2; i++)); do printf '\n' >&2; done
+            for ((i = 0; i < n; i++)); do printf '\n' >&2; done
         fi
-        printf '\e[%dA' "$(( n * 2 ))" >&2
+        printf '\e[%dA' "$n" >&2
         for ((i = 0; i < n; i++)); do
-            board_fmt "${tops[i]}" "$maxhost"
+            board_fmt "${lines[i]}" "$maxhost"
             printf '\e[2K%s %s\n' "${statuses[i]}" "${BOARD_LINE:0:cols > 4 ? cols - 4 : 1}" >&2
-            board_fmt "${bots[i]}" "$maxhost"
-            printf '\e[2K  %s\n' "${BOARD_LINE:0:cols > 4 ? cols - 4 : 1}" >&2
         done
         (( running )) || break
         sleep 0.2
