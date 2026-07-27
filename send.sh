@@ -260,7 +260,7 @@ fi
 # ---------- 10.  ship the stream ---------------------------------------------
 #
 if [[ -n "$common" ]]; then
-    echo "${dataset}@${common} => @${snapname}${dest_tag}" >&2
+    echo "${dataset}@${common}${dest_tag}" >&2
     # determine size of the incremental send
     size=$( zfs send -nP $SEND_RAW -I "${dataset}@${common}" "${full_snap}" | awk '/^size/{print $2;exit}' )
     # Incremental: -w (raw), -i FROM@ TO@
