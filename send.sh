@@ -111,19 +111,23 @@ snapname="${full_snap#*@}"    # snap
 #
 # ---------- 2.  open bidirectional TLS pipe ---------------------------------
 #
+# The address options are assembled in a variable on purpose: in the old
+# backslash-continued command line, one missing "\" silently turned the
+# remaining options into a no-op shell variable assignment (valid syntax,
+# so bash -n was clean) and socat dialed out with no cert/key/cafile at all.
+ssl_opts="connect-timeout=10"
+ssl_opts+=",so-keepalive"
+ssl_opts+=",nodelay"
+ssl_opts+=",cert=/etc/zfsrecvd/client.pem"
+ssl_opts+=",key=/etc/zfsrecvd/client.key"
+ssl_opts+=",cafile=/etc/zfsrecvd/ca.pem"
+ssl_opts+=",verify=1"
+
 coproc NET {
-exec socat \
--b 262144 \
-STDIO \
-OPENSSL:"${remote}":"$tcp_port",\
-connect-timeout=10,\
-so-keepalive,\
-nodelay,
-cert=/etc/zfsrecvd/client.pem,\
-key=/etc/zfsrecvd/client.key,\
-cafile=/etc/zfsrecvd/ca.pem,\
-verify=1 \
-2> >(grep -v "OpenSSL: Warning: this implementation does not check CRLs" >&2)
+    exec socat -b 262144 \
+        STDIO \
+        "OPENSSL:${remote}:${tcp_port},${ssl_opts}" \
+        2> >(grep -v "OpenSSL: Warning: this implementation does not check CRLs" >&2)
 }
 
 exec {OUT}>&"${NET[1]}"   # write‑end to server
