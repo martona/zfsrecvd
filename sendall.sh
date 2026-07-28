@@ -17,6 +17,14 @@ if ! flock -n "$lock_fd"; then
     exit 75
 fi
 
+# Freeze the output width once per run: pv bars sized now stay stable no
+# matter how the terminal is resized mid-run. Under orchestrate the pty is
+# already pinned (and this just reads that pinned width); on a direct
+# interactive run it captures the real terminal once.
+if [[ -t 2 && -z "${ZFSRECVD_COLS:-}" ]]; then
+    export ZFSRECVD_COLS="$(tput cols 2>/dev/null || echo 120)"
+fi
+
 snap="zfsrecvd-$(date -u +%Y-%m-%d-%H%MZ)"
 
 declare -A snapped=()          # dataset -> ok|failed; snapshot taken once per run

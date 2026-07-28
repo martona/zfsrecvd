@@ -34,9 +34,15 @@ source /etc/zfsrecvd/cfgparser.sh
 # a fresh row instead of overwriting in place. Shrink pv to compensate.
 PV_WIDTH_FLAG=""
 if [[ "${ZFSRECVD_INDENT:-0}" -gt 0 ]]; then
-    # 2>/dev/null must come FIRST: redirections apply left to right, and a
-    # failed /dev/tty open reports to whatever stderr is at that moment
-    cols=$(stty size 2>/dev/null </dev/tty | awk '{print $2}') || true
+    # Width source, in order: ZFSRECVD_COLS (frozen once at sendall or
+    # orchestrate startup -- stable against mid-run resizes), else a live
+    # probe of the controlling tty. In the probe, 2>/dev/null must come
+    # FIRST: redirections apply left to right, and a failed /dev/tty open
+    # reports to whatever stderr is at that moment.
+    cols="${ZFSRECVD_COLS:-}"
+    if [[ -z "$cols" ]]; then
+        cols=$(stty size 2>/dev/null </dev/tty | awk '{print $2}') || true
+    fi
     if [[ -n "${cols:-}" && "$cols" -gt $(( ${ZFSRECVD_INDENT:-0} + 20 )) ]]; then
         PV_WIDTH_FLAG="-w $(( cols - ${ZFSRECVD_INDENT:-0} - 1 ))"
     fi

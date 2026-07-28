@@ -65,14 +65,6 @@ latest_line() {
     tail -c 4096 "$1" 2>/dev/null | tr '\r' '\n' | grep -v '^[[:space:]]*$' | tail -n 1 || true
 }
 
-# Re-pad "[host]>[rest]" so the ">" column lines up across the board.
-board_fmt() {
-    BOARD_LINE="$1"
-    if [[ $BOARD_LINE =~ ^\[([^]]+)\]\>(.*)$ ]]; then
-        BOARD_LINE=$(printf '[%-*s]>%s' "$2" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}")
-    fi
-}
-
 orch_cleanup() {
     local p
     for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done
@@ -147,10 +139,7 @@ run_parallel_live() {
     fi
 
     logdir=$(mktemp -d /tmp/zfsrecvd-orch.XXXXXX)
-    local i maxhost=0
-    for ((i = 0; i < n; i++)); do
-        (( ${#hosts[i]} > maxhost )) && maxhost=${#hosts[i]}
-    done
+    local i
 
     local c_run=$'\e[36m' c_ok=$'\e[32m' c_warn=$'\e[33m' c_err=$'\e[31m' c_off=$'\e[0m'
     local rcs=() finished=() statuses=() lines=()
@@ -158,11 +147,14 @@ run_parallel_live() {
     local cols prev_cols
     cols=$(tput cols 2>/dev/null) || cols=120
     prev_cols=$cols
-    # Pin the remote pty width to the local terminal (minus the glyph
-    # column) so pv sizes its bars to what actually fits on the board.
-    # With stdin on /dev/null, ssh leaves the forced pty at a default size
-    # that has nothing to do with this terminal, so we tell it ourselves.
-    local remote_cols=$(( cols > 40 ? cols - 2 : cols ))
+    # Pin the remote pty width so pv sizes its bars to fit the board (with
+    # stdin on /dev/null, ssh leaves the forced pty at a default size that
+    # has nothing to do with this terminal). The width is decided ONCE per
+    # run and clamped to 132 columns total, so the logs stay readable when
+    # viewed later in a narrower terminal than the board ran in; set
+    # ZFSRECVD_COLS to override the clamp.
+    local wire_cols="${ZFSRECVD_COLS:-$(( cols < 132 ? cols : 132 ))}"
+    local remote_cols=$(( wire_cols > 40 ? wire_cols - 2 : wire_cols ))
 
     echo "Orchestrating ${n} hosts in parallel (logs: $logdir)" >&2
     for ((i = 0; i < n; i++)); do
@@ -212,8 +204,8 @@ run_parallel_live() {
         fi
         printf '\e[%dA' "$n" >&2
         for ((i = 0; i < n; i++)); do
-            board_fmt "${lines[i]}" "$maxhost"
-            printf '\e[2K%s %s\n' "${statuses[i]}" "${BOARD_LINE:0:cols > 4 ? cols - 4 : 1}" >&2
+            content="${lines[i]}"
+            printf '\e[2K%s %s\n' "${statuses[i]}" "${content:0:cols > 4 ? cols - 4 : 1}" >&2
         done
         (( running )) || break
         sleep 0.2

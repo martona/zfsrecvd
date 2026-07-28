@@ -3,8 +3,12 @@
 # run_indented <prefix> <command> [args...]
 #
 # Executes the command and prepends the prefix to every line of its combined
-# stdout+stderr. Records are split on both \n and \r, so pv-style progress
-# bars keep refreshing in place with the prefix intact. The fflush() is
+# stdout+stderr. Records are split on \r\n, \r, or \n -- longest match
+# first, so a CRLF pair is ONE separator; splitting on the characters
+# individually would yield an empty record between \r and \n, which came
+# out as a spurious prefix-only line after every completed pv display.
+# Bare \r stays a separator of its own, so progress bars keep refreshing
+# in place with the prefix intact. The fflush() is
 # load-bearing: stdio only flushes on \n, and pv's in-place updates end in a
 # bare \r -- without an explicit flush they sit in gawk's buffer until the
 # transfer ends, which is why an earlier version of this appeared to produce
@@ -22,7 +26,7 @@ if command -v gawk >/dev/null 2>&1; then
         local prefix=$1; shift
         ZFSRECVD_INDENT=$(( ${ZFSRECVD_INDENT:-0} + ${#prefix} )) \
         "$@" 2>&1 | gawk -v p="$prefix" '
-            BEGIN       { RS = "[\r\n]"; ORS = "" }
+            BEGIN       { RS = "\r\n|\r|\n"; ORS = "" }
             { printf "%s%s%s", p, $0, RT; fflush() }
         '
         return "${PIPESTATUS[0]}"
