@@ -235,7 +235,9 @@ run_parallel_live() {
                 0|75) : ;;
                 *)
                     echo "---- [${hosts[i]}] last lines (full log: $logdir/${hosts[i]}.log) ----" >&2
-                    tr '\r' '\n' <"$logdir/${hosts[i]}.log" | tail -n 40 >&2
+                    # strip the pty's CRLF first, then split pv's bare-\r
+                    # records; doing tr alone would double-space every line
+                    sed -e 's/\r$//' "$logdir/${hosts[i]}.log" | tr '\r' '\n' | tail -n 40 >&2
                     ;;
             esac
         done

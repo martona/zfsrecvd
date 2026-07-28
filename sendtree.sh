@@ -8,6 +8,15 @@
 #   Without @snap, the newest snapshot of the root dataset is the target;
 #   descendants lacking that snapshot are skipped with a warning.
 #
+# Shape of a run: gather local tree state (3 zfs invocations), connect,
+# announce the tree, receive the server's HAVE/TOKEN state, then walk the
+# datasets deciding per dataset: nothing (already on the receiver), resume,
+# abort-then-send, incremental, bootstrap two-step, or full send. Streams
+# share the one connection with stop-and-wait discipline: after a stream
+# we write nothing until the server's result line arrives. If the session
+# dies we reconnect and replan; finished work shows up as up-to-date and
+# costs nothing the second time.
+#
 # Requires: /etc/zfsrecvd/{client.pem,client.key,ca.pem}, socat, pv.
 #
 # Exit: 0 all datasets ok (skips are warnings),
@@ -15,7 +24,7 @@
 #       3 no session could ever be established.
 
 set -euo pipefail
-set -f
+set -f                       # never glob; plenty of protocol word-splitting
 source /etc/zfsrecvd/cfgparser.sh
 
 # When we run under run_indented (see sendall.sh), every line we emit grows
@@ -25,7 +34,9 @@ source /etc/zfsrecvd/cfgparser.sh
 # a fresh row instead of overwriting in place. Shrink pv to compensate.
 PV_WIDTH_FLAG=""
 if [[ "${ZFSRECVD_INDENT:-0}" -gt 0 ]]; then
-    cols=$(stty size </dev/tty 2>/dev/null | awk '{print $2}') || true
+    # 2>/dev/null must come FIRST: redirections apply left to right, and a
+    # failed /dev/tty open reports to whatever stderr is at that moment
+    cols=$(stty size 2>/dev/null </dev/tty | awk '{print $2}') || true
     if [[ -n "${cols:-}" && "$cols" -gt $(( ${ZFSRECVD_INDENT:-0} + 20 )) ]]; then
         PV_WIDTH_FLAG="-w $(( cols - ${ZFSRECVD_INDENT:-0} - 1 ))"
     fi
@@ -34,7 +45,7 @@ fi
 #
 # ---------- 0.  arguments ----------------------------------------------------
 #
-single=""
+single=""                    # nonempty: one dataset only, no descendants
 if [[ "${1:-}" == "--single" ]]; then
     single=1
     shift
@@ -46,6 +57,8 @@ fi
 arg="$1"
 remote="$2"          # extra legacy arguments (old sentinel file) are ignored
 
+# Split dataset from target snapshot; with no @snap, the newest snapshot of
+# the root names the run (sendall just created it, so newest is the run's).
 root="" target=""
 if [[ "$arg" == *@* ]]; then
     root="${arg%@*}"
@@ -60,8 +73,8 @@ else
     fi
 fi
 
-# Under run_indented the prefix already names both ends; on a bare manual
-# run there is no prefix, so append the destination for context.
+# Under run_indented the line prefix already names both ends; on a bare
+# manual run there is no prefix, so announce lines append the destination.
 dest_tag=""
 if [[ "${ZFSRECVD_INDENT:-0}" -eq 0 ]]; then
     dest_tag=" -> [${remote}]"
@@ -70,8 +83,10 @@ fi
 #
 # ---------- 1.  gather local state (3 zfs invocations) -----------------------
 #
-datasets=()
-declare -A dstype lsnaps encroot encon
+datasets=()                          # tree in zfs list -r order (parents first)
+declare -A dstype                    # dataset -> filesystem|volume
+declare -A lsnaps                    # dataset -> local snaps, comma-joined, oldest first
+declare -A encroot encon             # encryptionroot / encryption per dataset
 
 while IFS=$'\t' read -r name typ; do
     datasets+=( "$name" )
@@ -107,8 +122,10 @@ while IFS=$'\t' read -r name prop val; do
     esac
 done < <(zfs get -H -r -t filesystem,volume -o name,property,value encryptionroot,encryption "$root")
 
-# "-w" for encrypted datasets; "-R" for plain volumes (works around the
-# OpenZFS 13033-adjacent unencrypted-zvol-into-encrypted-parent issue).
+# Send-mode flags for one dataset: "-w" (raw) if its encryption root is
+# encrypted; else "-R" for plain volumes, working around the OpenZFS
+# 13033-adjacent unencrypted-zvol-into-encrypted-parent receive bug; else
+# nothing. An encryption root outside the tree is looked up once and cached.
 send_flags_for() {
     local ds="$1" er e
     er="${encroot[$ds]:--}"
@@ -130,7 +147,10 @@ send_flags_for() {
     echo ""
 }
 
-estimate() {   # zfs send args... -> bytes or "-"
+# Dry-run size of a send (bytes), for pv -s and the SEND line; "-" when the
+# estimate can't be had. 2>&1 because some send variants print the size
+# line to stderr.
+estimate() {
     local sz
     sz=$(zfs send -nP "$@" 2>&1 | awk '/^size/{print $2; exit}') || sz=""
     echo "${sz:--}"
@@ -139,11 +159,13 @@ estimate() {   # zfs send args... -> bytes or "-"
 #
 # ---------- 2.  session plumbing ---------------------------------------------
 #
-IN="" OUT=""
+IN="" OUT=""                 # fds of the read/write ends of the TLS coproc
 
+# Tear down the coproc and its fds; safe to call twice (and called once
+# more via the EXIT trap). No stray redirections on these execs: an exec
+# redirection is permanent, so a careless "2>/dev/null" here would silence
+# the rest of the script.
 close_session() {
-    # No stray redirections on these execs: an exec redirection is permanent,
-    # so a careless "2>/dev/null" here would silence the rest of the script.
     if [[ -n "${OUT:-}" ]]; then
         exec {OUT}>&- || true
         OUT=""
@@ -159,6 +181,9 @@ close_session() {
 }
 trap close_session EXIT
 
+# Open the TLS connection (socat coproc), send our version, and require the
+# server's greeting. Nonzero means "no usable session" -- the caller
+# decides whether to retry.
 connect_session() {
     local ssl_opts="connect-timeout=10"
     ssl_opts+=",so-keepalive"
@@ -183,10 +208,15 @@ connect_session() {
         close_session
         return 1
     fi
+    echo "connected to [$remote] (zfsrecvd2.0)" >&2
     return 0
 }
 
-declare -A have token
+# Announce the tree (manifest of our datasets) and parse the server's
+# state dump into have[]/token[]. Nonzero on any hiccup -- the caller
+# treats that as a dead session.
+declare -A have              # dataset -> receiver's snaps, comma-joined, oldest first
+declare -A token             # dataset -> receiver's pending resume token
 send_tree_block() {
     {
         printf 'TREE %s %s\n' "$root" "$target"
@@ -219,8 +249,11 @@ send_tree_block() {
 # ---------- 3.  transfer primitive -------------------------------------------
 #
 # xfer <announce> <est> <cmdline> <zfs send args...>
-# 0 = ok, 1 = refused (permanent for this dataset), 2 = session dead
-sent_n=0
+# One command/stream/result exchange. Returns 0 = ok, 1 = server refused
+# (permanent for this dataset, session healthy), 2 = session dead (any
+# post-GO error: an unframed stream can't be resynchronized, so both sides
+# abandon the connection and we rely on reconnect + resume tokens).
+sent_n=0                     # successful transfers this run (for the summary)
 xfer() {
     local announce="$1" est="$2" cmdline="$3"
     shift 3
@@ -233,6 +266,8 @@ xfer() {
         return 1
     fi
     [[ "$reply" == "GO" ]] || return 2
+    # pv only gets -s when the estimate is a real number ("-" would be
+    # taken as a filename).
     local est_pv=""
     if [[ "$est" =~ ^[0-9]+$ ]]; then
         est_pv="$est"
@@ -250,6 +285,9 @@ xfer() {
         echo "ERROR: local send failed for [$cmdline] (zfs=$rc pv=$pvrc)" >&2
         return 2
     fi
+    # Stop-and-wait: nothing is written after the stream until this result
+    # line arrives -- that guarantee is what lets zfs recv read the socket
+    # directly with no framing layer.
     IFS= read -r -t 600 -u "$IN" reply || return 2
     case "$reply" in
         OK\ *)
@@ -266,10 +304,11 @@ xfer() {
 #
 # ---------- 4.  per-dataset planner ------------------------------------------
 #
-# 0 = done (sent, up to date, or warn-skipped), 1 = failed permanently,
-# 2 = session dead
-utd_n=0
-skip_n=0
+# Decide and perform what one dataset needs, possibly several transfers
+# (resume then top-up; bootstrap then top-up). Returns 0 = done (sent, up
+# to date, or warn-skipped), 1 = failed permanently, 2 = session dead.
+utd_n=0                      # datasets already up to date (zero wire cost)
+skip_n=0                     # datasets skipped for missing the target snap
 plan_one() {
     local ds="$1" rc est flags common reply
     if ! [[ ",${lsnaps[$ds]:-}," == *",$target,"* ]]; then
@@ -285,11 +324,15 @@ plan_one() {
     if [[ -n "${token[$ds]:-}" ]]; then
         local tk="${token[$ds]}" tinfo toname rsn
         if tinfo=$(zfs send -nP -t "$tk" 2>&1); then
+            # Token is satisfiable here: resume the interrupted stream, then
+            # fall through and re-plan -- the token may predate newer snaps.
             est=$(awk '/^size/{print $2; exit}' <<<"$tinfo")
             xfer "${ds} (resume)${dest_tag}" "${est:--}" "RESUME $ds ${est:--}" -t "$tk"
             rc=$?
             [[ $rc -ne 0 ]] && return $rc
             unset "token[$ds]"
+            # The dry-run's toname tells us which snapshot the resume
+            # completed; credit it to the receiver's state.
             toname=$(awk '$1 == "toname" {print $3; exit}' <<<"$tinfo")
             rsn="${toname#*@}"
             if [[ -z "$rsn" ]]; then
@@ -301,6 +344,8 @@ plan_one() {
                 return 0
             fi
         else
+            # We no longer have what the token needs (snapshot pruned);
+            # have the receiver discard it or the dataset wedges forever.
             echo "NOTE: [$ds] resume token not satisfiable here; discarding it on receiver" >&2
             printf 'ABORT %s\n' "$ds" >&"$OUT" 2>/dev/null || return 2
             IFS= read -r -t 120 -u "$IN" reply || return 2
@@ -320,6 +365,7 @@ plan_one() {
         return 0
     fi
 
+    # Newest snapshot both sides know, by name: the incremental base.
     common=$(local_newest_common "$ds")
     if [[ -n "$common" ]]; then
         est=$(estimate $flags -I "${ds}@${common}" "${ds}@${target}")
@@ -329,8 +375,8 @@ plan_one() {
     fi
 
     if [[ -z "${have[$ds]:-}" ]]; then
-        # bootstrap: seed with the oldest snapshot, then bring up to target,
-        # preserving history depth on the receiver
+        # Receiver has nothing: bootstrap with the oldest snapshot, then
+        # bring it to target with -I, preserving history depth remotely.
         local ls=()
         IFS=, read -r -a ls <<<"${lsnaps[$ds]}"
         local oldest="${ls[0]}"
@@ -347,13 +393,16 @@ plan_one() {
         fi
     fi
 
-    # first snapshot ever, or diverged receiver (source is authoritative)
+    # First snapshot ever, or a diverged receiver (it has snaps, none in
+    # common). Full send; the receiver's -F makes the source authoritative.
     est=$(estimate $flags "${ds}@${target}")
     xfer "${ds}@${target} (full send)${dest_tag}" "$est" "SEND $ds - $target $est" \
         $flags "${ds}@${target}"
     return $?
 }
 
+# Newest local snapshot (walking newest to oldest) that the receiver also
+# has, by name; empty if histories share nothing.
 local_newest_common() {
     local ds="$1" i
     local ls=()
@@ -370,8 +419,19 @@ local_newest_common() {
 #
 # ---------- 5.  session loop with reconnect ----------------------------------
 #
-declare -A done_ds dskill ok_ds
-failed=()
+# Retry accounting, tuned to fail fast on hopeless targets but survive
+# flaky links:
+#   conn_tries -- consecutive failures to establish the FIRST session;
+#                 5 of those and the host is unreachable (exit 3).
+#   strikes    -- consecutive dead sessions with zero completed datasets;
+#                 3 of those and we give up on what's left. Any progress
+#                 resets it: a 47-of-50-then-die session is progress.
+#   dskill     -- per-dataset session kills; a dataset that killed 2
+#                 sessions is marked failed so one poison dataset can't
+#                 block the rest of the tree forever.
+declare -A done_ds           # dataset -> handled (any outcome), skip when replanning
+declare -A dskill ok_ds
+failed=()                    # "<dataset> (reason)" collected for the summary
 strikes=0
 conn_tries=0
 ever_connected=""
@@ -394,6 +454,7 @@ while true; do
                 echo "ERROR: no session to [$remote] after $conn_tries attempts" >&2
                 exit 3
             fi
+            echo "NOTE: connect to [$remote] failed (attempt $conn_tries/5); retrying" >&2
             sleep 5
             continue
         fi
@@ -417,8 +478,9 @@ while true; do
         sleep 2
         continue
     fi
+    echo "tree [$root@$target] -> [$remote]: ${#datasets[@]} datasets local, ${#have[@]} known to receiver" >&2
 
-    progress=0
+    progress=0               # datasets settled this session (resets strikes)
     session_dead=""
     for ds in "${pending[@]}"; do
         set +e
@@ -443,6 +505,7 @@ while true; do
     done
 
     if [[ -z "$session_dead" ]]; then
+        # Clean finish: ENDTREE triggers the receiver's prune+stamp pass.
         if printf 'ENDTREE\n' >&"$OUT" 2>/dev/null \
             && IFS= read -r -t 600 -u "$IN" reply \
             && [[ "$reply" == "OK ENDTREE" ]]; then
@@ -465,10 +528,11 @@ while true; do
         echo "ERROR: giving up after 3 sessions without progress" >&2
         break
     fi
+    echo "NOTE: session with [$remote] lost; reconnecting" >&2
     sleep 2
 done
 
-# anything never reached counts as failed
+# Anything the retry loop never got to counts as failed.
 for ds in "${datasets[@]}"; do
     if [[ -z "${done_ds[$ds]:-}" ]]; then
         failed+=( "$ds (unsent)" )
@@ -478,9 +542,13 @@ done
 #
 # ---------- 6.  local prune (only datasets that fully succeeded) --------------
 #
+# Same policy as the receiver (keep the newest keep_count prunable-prefix
+# snapshots per dataset), but restricted to datasets that replicated
+# cleanly: pruning under a failed dataset could destroy the very snapshot
+# a future incremental needs as its base.
 prune_local() {
     local snap ds name prefix matched extra i
-    declare -A psnaps=()
+    declare -A psnaps=()     # dataset -> space-joined prunable snaps, oldest first
     local order=()
     while IFS= read -r snap; do
         ds="${snap%@*}"
@@ -510,6 +578,7 @@ prune_local() {
         read -r -a list <<<"${psnaps[$ds]}"
         extra=$(( ${#list[@]} - keep_count ))
         for (( i = 0; i < extra; i++ )); do
+            echo "pruning ${list[i]}" >&2
             zfs destroy "${list[i]}" 2>/dev/null \
                 || echo "WARNING: failed to prune old local snapshot: ${list[i]}" >&2
         done

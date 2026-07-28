@@ -11,7 +11,7 @@ None of this is rocket science, nor do I expect it to interest anyone, but I do 
 
 ## What
 
-Instead of SSH, I use Wireguard for linking the EC2 instance to my network, then `socat` to move the zfs-send between boxes. The wire protocol (one TLS session per dataset tree, multiplexed streams, in-band results) is documented in `PROTOCOL.md`; `vmtest.sh` is an end-to-end suite that exercises it against a throwaway file-backed pool. There's a recv-side script (auto-spawned by a systemd service) that handles mutual TLS authentication, and a send-side script to assist with finding common snapshot ancestors, then they both hand traffic over to `zfs send` and `zfs recv`.
+Instead of SSH, I use Wireguard for linking the EC2 instance to my network, then `socat` to move the zfs-send between boxes. The wire protocol runs one TLS session per dataset tree, multiplexes the zfs streams over it, and reports per-dataset results in-band; `vmtest.sh` is an end-to-end suite that exercises all of it against a throwaway file-backed pool. There's a recv-side script (auto-spawned by a systemd service) that handles mutual TLS authentication, and a send-side script to assist with finding common snapshot ancestors, then they both hand traffic over to `zfs send` and `zfs recv`.
 
 Requirements:
 
