@@ -5,3 +5,6 @@ ca.pem
 client.pem
 client.key
 allowed_hosts.txt
+
+# AI
+/.claude/

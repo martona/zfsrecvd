@@ -1,145 +1,314 @@
 #!/usr/bin/env bash
-# Wrapper for socat -> ZFS receive with simple header protocol
-#   * Mutual‑TLS already done by socat; we just check if CN is whitelisted.
-#   * Creates ebs/recv/<CN>/<ds_path minus last component>
-#   * Finally execs:  zfs recv -u -F -e <parent>
+# zfsrecvd protocol 2.0 receiver. One process per connection (spawned by
+# socat, see listen.sh), serving one session: any number of TREE exchanges,
+# each with SEND/RESUME/ABORT transfers, ended by ENDTREE. See PROTOCOL.md
+# for the contract; v1.1 is not supported (fleet upgrades atomically).
+#
+# stdin/stdout are the TLS socket; stderr goes to the journal.
 
 set -euo pipefail
+set -f
 source /etc/zfsrecvd/cfgparser.sh
+
+RE_DATASET='^[A-Za-z0-9._][A-Za-z0-9._/-]*$'
+RE_SNAP='^[A-Za-z0-9._-]+$'
+RE_SIZE='^([0-9]+|-)$'
+
+log() { echo "$*" >&2; }
+out() { printf '%s\n' "$*"; }
+
+proto_err() {
+    out "ERR proto $*"
+    log "protocol error: $*"
+    exit 1
+}
 
 #
 # ---- 1. authenticate CN -----------------------------------------------------
 #
 cn="${SOCAT_OPENSSL_X509_COMMONNAME-}"
 if [[ -z "$cn" ]]; then
-    echo "ERROR: TLS CN missing; socat not started with OPENSSL-LISTEN verify=1?" >&2
+    log "ERROR: TLS CN missing; socat not started with OPENSSL-LISTEN verify=1?"
     exit 1
 fi
 if ! [[ " ${allowed_hosts[*]} " == *" $cn "* ]]; then
-    echo "ERROR: CN '$cn' not authorized" >&2
+    log "ERROR: CN '$cn' not authorized"
     exit 1
 fi
-safe_cn=${cn//[^[:alnum:]._-]/_}           # basic sanitization
-echo "Processing connection from: $safe_cn" >&2
+safe_cn=${cn//[^[:alnum:]._-]/_}
+dest_base="${recv_root}/${safe_cn}"
+log "session from: $safe_cn"
 
 #
-# ---- 2. read header lines ---------------------------------------------------
+# ---- 2. version sanity check ------------------------------------------------
 #
-lines=()
-while true; do
-    IFS= read -r line || { echo "ERROR: reading header" >&2; exit 1; }
-    if [[ -z $line ]]; then                # blank line => list finished
-        break
+IFS= read -r -t 30 hello || { log "ERROR: no version line"; exit 1; }
+if ! [[ "$hello" =~ ^zfsrecvd2\.[0-9]+$ ]]; then
+    log "ERROR: unsupported version '$hello'"
+    exit 1
+fi
+out "OK zfsrecvd2.0"
+
+#
+# ---- session state ----------------------------------------------------------
+#
+declare -A made_parents=()
+base_ready=""
+tree_root=""
+received=()
+
+in_tree() {
+    [[ "$1" == "$tree_root" || "$1" == "$tree_root"/* ]]
+}
+
+ensure_base() {
+    if [[ -z "$base_ready" ]]; then
+        zfs list -H -o name "$dest_base" >/dev/null 2>&1 \
+            || zfs create -o mountpoint=none "$dest_base" 2>/dev/null \
+            || return 1
+        base_ready=1
     fi
-    lines+=( "$line" )
-done
-if [[ ${#lines[@]} -lt 2 ]]; then
-    echo "ERROR: expected at least 2 lines header" >&2
-    exit 119
-fi
+}
 
-[[ "${lines[0]}" == "zfsrecvd1.1" ]] || { echo "ERROR: unsupported version '${lines[0]}'" >&2; exit 1; }
-intent="${lines[1]}"
-[[ "$intent" =~ ^[A-Za-z0-9._/-]+@[A-Za-z0-9._-]+$ ]] || { echo "ERROR: malformed intent: [$intent]" >&2; exit 1; }
-
-dataset_with_snap="$intent"                # e.g. "tank/outer/inner/actual@snap2025-06-18" 
-dataset="${dataset_with_snap%@*}"          # strip "@snap"
-leaf="${dataset##*/}"                      # last component
-parent="${dataset%/*}"                     # everything before leaf
-[[ "$parent" == "$dataset" ]] && parent="" # no slash case
-echo "Intent: $dataset_with_snap" >&2
-dest_base="${recv_root}/${safe_cn}"        # ebs/recv/hostname
-dest_parent="$dest_base"
-[[ -n "$parent" ]] && dest_parent="${dest_base}/${parent}" # ebs/recv/hostname/ds_path_minus_last_component
-
+ensure_parent() {   # $1 = source dataset path; nonzero if base can't be made
+    local parent="${dest_base}/$1"
+    parent="${parent%/*}"
+    if [[ -n "${made_parents[$parent]:-}" ]]; then
+        return 0
+    fi
+    ensure_base || return 1
+    # -o is ignored with -p (hence ensure_base above); pre-existing is fine.
+    zfs create -p "$parent" 2>/dev/null || true
+    made_parents[$parent]=1
+}
 
 #
-# ---- 3. resume? -------------------------------------------------------------
+# ---- state dump -------------------------------------------------------------
 #
-token_ds=""
-token_val=""
-while read -r ds; do
-  # Check if the receive_resume_token property is set and not empty ('-')
-  token_val=$(zfs get -H -p -o value receive_resume_token "$ds")
-  if [[ "$token_val" != "-" ]]; then
-    token_ds="$ds"
-    break
-  fi
-done < <(zfs list -H -o name -t filesystem,volume "${dest_base}/${dataset}" 2>/dev/null || true)
-
-if [[ -n "$token_ds" ]]; then
-    # tell client that we've found a token; we expect it to resume from it.
-    echo "TOKEN: $token_ds=$token_val"
-    echo
-    echo "Resuming dataset: [${token_ds}]" >&2
-    zfs recv -s "$token_ds"
-    echo "Successfully resumed & completed [${token_ds}]" >&2
-    echo DONE
-    echo
-    exit 0
-fi
-
-#
-# ---- 3. ensure parent datasets exist ----------------------------------------
-#
-
-# If hostname wasn't seen before, create its root dataset without a mountpoint.
-zfs list -H "$dest_base" >/dev/null 2>&1 || zfs create -o mountpoint=none "$dest_base"
-
-# Create full path for recv target if doesn't exist (-o ignored with -p by zfs,
-# which is why we had to do the above step separately).
-# Ignore errors here, e.g. if path already exists.
-zfs create -p "$dest_parent" 2>/dev/null || true
+emit_state() {
+    local dest_tree="${dest_base}/${tree_root}"
+    local pfx="${dest_base}/"
+    zfs list -H -r -t snapshot -s creation -o name "$dest_tree" 2>/dev/null | awk -v pfx="$pfx" '
+        {
+            at = index($0, "@"); if (at == 0) next
+            ds = substr($0, 1, at - 1)
+            sn = substr($0, at + 1)
+            if (index(ds, pfx) != 1) next
+            rel = substr(ds, length(pfx) + 1)
+            if (rel in acc) acc[rel] = acc[rel] "," sn
+            else { order[++n] = rel; acc[rel] = sn }
+        }
+        END { for (i = 1; i <= n; i++) printf "HAVE %s %s\n", order[i], acc[order[i]] }
+    ' || true
+    zfs get -H -r -t filesystem,volume -o name,value receive_resume_token "$dest_tree" 2>/dev/null \
+        | awk -v pfx="$pfx" '
+            $2 != "-" && index($1, pfx) == 1 {
+                printf "TOKEN %s %s\n", substr($1, length(pfx) + 1), $2
+            }
+        ' || true
+    out ""
+}
 
 #
-# ---- 4. send snapshot list back to client ---------------------------------
+# ---- transfers --------------------------------------------------------------
 #
-# List any existing snapshots for the exact dataset path.
-# Respond with this to client.
-echo "Listing existing snapshots for: ${dest_base}/$dataset" >&2
-zfs list -H -o name -t snapshot -d 1 "${dest_base}/${dataset}" 2>/dev/null | awk 'NF==1 {printf "SNAPSHOT: %s\n", $1}' | tee /dev/stderr || true
-# Complete the list with a single empty line.
-echo
+do_send() {
+    local _ ds from to est extra
+    read -r _ ds from to est extra <<<"$1"
+    [[ -n "$est" && -z "$extra" ]] || proto_err "SEND arity"
+    [[ "$ds" =~ $RE_DATASET ]] || proto_err "SEND dataset"
+    [[ "$from" == "-" || "$from" =~ $RE_SNAP ]] || proto_err "SEND from-snap"
+    [[ "$to" =~ $RE_SNAP ]] || proto_err "SEND to-snap"
+    [[ "$est" =~ $RE_SIZE ]] || proto_err "SEND size"
+    if ! in_tree "$ds"; then
+        out "ERR refused $ds not under session tree"
+        log "refused SEND $ds (outside $tree_root)"
+        return 0
+    fi
+    if ! ensure_parent "$ds"; then
+        out "ERR refused $ds cannot create destination (recv_root '$recv_root' missing?)"
+        log "refused SEND $ds: cannot create destination under $dest_base"
+        return 0
+    fi
+    local parent="${dest_base}/${ds}"
+    parent="${parent%/*}"
+    out "GO"
+    local errf rc detail
+    errf=$(mktemp)
+    if zfs recv -s -u -F -e -x canmount "$parent" 2>"$errf"; then
+        rm -f -- "$errf"
+        out "OK $ds"
+        received+=( "${dest_base}/${ds}" )
+        log "received $ds ($from -> $to)"
+    else
+        rc=$?
+        detail=$(tail -n 1 "$errf" | tr -dc '[:print:]' | cut -c 1-500)
+        rm -f -- "$errf"
+        out "ERR recv $ds ${detail:-zfs recv exit $rc}"
+        log "recv FAILED for $ds: ${detail:-exit $rc}; closing session"
+        exit 1
+    fi
+}
+
+do_resume() {
+    local _ ds est extra
+    read -r _ ds est extra <<<"$1"
+    [[ -n "$est" && -z "$extra" ]] || proto_err "RESUME arity"
+    [[ "$ds" =~ $RE_DATASET ]] || proto_err "RESUME dataset"
+    [[ "$est" =~ $RE_SIZE ]] || proto_err "RESUME size"
+    if ! in_tree "$ds"; then
+        out "ERR refused $ds not under session tree"
+        return 0
+    fi
+    out "GO"
+    local errf rc detail
+    errf=$(mktemp)
+    if zfs recv -s "${dest_base}/${ds}" 2>"$errf"; then
+        rm -f -- "$errf"
+        out "OK $ds"
+        received+=( "${dest_base}/${ds}" )
+        log "resumed $ds"
+    else
+        rc=$?
+        detail=$(tail -n 1 "$errf" | tr -dc '[:print:]' | cut -c 1-500)
+        rm -f -- "$errf"
+        out "ERR recv $ds ${detail:-zfs recv exit $rc}"
+        log "resume FAILED for $ds: ${detail:-exit $rc}; closing session"
+        exit 1
+    fi
+}
+
+do_abort() {
+    local _ ds extra
+    read -r _ ds extra <<<"$1"
+    [[ -n "$ds" && -z "$extra" ]] || proto_err "ABORT arity"
+    [[ "$ds" =~ $RE_DATASET ]] || proto_err "ABORT dataset"
+    if ! in_tree "$ds"; then
+        out "ERR refused $ds not under session tree"
+        return 0
+    fi
+    local errf detail
+    errf=$(mktemp)
+    if zfs recv -A "${dest_base}/${ds}" 2>"$errf"; then
+        rm -f -- "$errf"
+        out "OK $ds"
+        log "aborted pending resume on $ds"
+    else
+        detail=$(tail -n 1 "$errf" | tr -dc '[:print:]' | cut -c 1-500)
+        rm -f -- "$errf"
+        # no stream was involved, so the session is still in sync
+        out "ERR refused $ds abort failed: ${detail:-unknown}"
+        log "recv -A failed for $ds: ${detail:-unknown}"
+    fi
+}
 
 #
-# ---- 5. hand stream off to ZFS ----------------------------------------------
+# ---- pruning + stamping (at ENDTREE) ----------------------------------------
 #
-echo "Receiving: $dataset_with_snap" >&2
-/sbin/zfs recv -s -u -F -e -x canmount "$dest_parent"
-echo "Successfully completed: $dataset_with_snap" >&2
+prune_tree() {
+    local dest_tree="${dest_base}/${tree_root}"
+    local snap ds name prefix matched extra i
+    declare -A psnaps=()
+    local order=()
+    while IFS= read -r snap; do
+        ds="${snap%@*}"
+        name="${snap#*@}"
+        matched=""
+        for prefix in "${prune_prefixes[@]}"; do
+            if [[ "$name" == "$prefix"* ]]; then
+                matched=1
+                break
+            fi
+        done
+        [[ -n "$matched" ]] || continue
+        if [[ -z "${psnaps[$ds]:-}" ]]; then
+            order+=( "$ds" )
+        fi
+        psnaps[$ds]="${psnaps[$ds]:-}${psnaps[$ds]:+ }$snap"
+    done < <(zfs list -H -r -t snapshot -s creation -o name "$dest_tree" 2>/dev/null || true)
+    local list=()
+    for ds in "${order[@]}"; do
+        read -r -a list <<<"${psnaps[$ds]}"
+        extra=$(( ${#list[@]} - keep_count ))
+        for (( i = 0; i < extra; i++ )); do
+            log "pruning ${list[i]}"
+            zfs destroy "${list[i]}" 2>/dev/null || log "WARNING: failed to prune ${list[i]}"
+        done
+    done
+}
 
-# ---- 6. prune old snapshots ------------------------------------------
+do_endtree() {
+    prune_tree
+    if [[ ${#received[@]} -gt 0 ]]; then
+        local stamp
+        stamp="zfsrecvd:last-recv=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        if ! zfs set "$stamp" "${received[@]}" 2>/dev/null; then
+            local d
+            for d in "${received[@]}"; do
+                zfs set "$stamp" "$d" 2>/dev/null || true
+            done
+        fi
+        log "stamped ${#received[@]} datasets"
+    fi
+    out "OK ENDTREE"
+}
+
 #
-target_ds="${dest_base}/${dataset}"
-mapfile -t remote_all < <(
-    # Get all snapshots for the newly updated dataset, oldest first
-    zfs list -H -o name -t snapshot -d 1 -s creation "$target_ds" 2>/dev/null || true
-)
-
-# keep_count and prune_prefixes come from zfsrecvd.conf (via cfgparser.sh).
-prunable_remote=()
-for snap in "${remote_all[@]}"; do
-    snap_name="${snap#*@}"
-    for prefix in "${prune_prefixes[@]}"; do
-        if [[ "$snap_name" == "$prefix"* ]]; then
-            prunable_remote+=("$snap")
+# ---- TREE handler -----------------------------------------------------------
+#
+handle_tree() {   # $1 = tree root, $2 = target snapname
+    tree_root="$1"
+    received=()
+    local snap="$2" line d manifest_count=0 ended=""
+    while IFS= read -r -t 120 line; do
+        if [[ -z "$line" ]]; then
+            ended=1
             break
         fi
-    done
-done
-
-total_snaps=${#prunable_remote[@]}
-if (( total_snaps > keep_count )); then
-    destroy_count=$(( total_snaps - keep_count ))
-
-    for snap in "${prunable_remote[@]:0:$destroy_count}"; do
-        echo "Pruning old remote snapshot: $snap" >&2
-        if ! zfs destroy "$snap"; then
-            echo "WARNING: failed to prune old snapshot: $snap" >&2
+        if [[ "$line" =~ ^DS\ ([A-Za-z0-9._/-]+)$ ]]; then
+            d="${BASH_REMATCH[1]}"
+            in_tree "$d" || proto_err "manifest dataset outside tree: $d"
+            manifest_count=$(( manifest_count + 1 ))
+        else
+            proto_err "bad manifest line"
         fi
     done
-fi
+    [[ -n "$ended" ]] || proto_err "eof/timeout in manifest"
+    log "TREE $tree_root@$snap ($manifest_count datasets in manifest)"
+    out "OK TREE"
+    emit_state
 
-# ---- 7. terminate ------------------------------------------
+    while true; do
+        IFS= read -r -t 300 line || { log "eof/idle in transfer loop"; exit 1; }
+        case "$line" in
+            SEND\ *)   do_send "$line" ;;
+            RESUME\ *) do_resume "$line" ;;
+            ABORT\ *)  do_abort "$line" ;;
+            ENDTREE)   do_endtree; return 0 ;;
+            *)         proto_err "unexpected in transfer loop" ;;
+        esac
+    done
+}
+
 #
-printf 'DONE\n\n'
+# ---- session loop -----------------------------------------------------------
+#
+while true; do
+    IFS= read -r -t 120 line || { log "session idle/eof; closing"; exit 0; }
+    case "$line" in
+        TREE\ *)
+            read -r _ troot tsnap textra <<<"$line"
+            [[ -n "${tsnap:-}" && -z "${textra:-}" ]] || proto_err "TREE arity"
+            [[ "$troot" =~ $RE_DATASET ]] || proto_err "TREE root"
+            [[ "$tsnap" =~ $RE_SNAP ]] || proto_err "TREE snap"
+            handle_tree "$troot" "$tsnap"
+            ;;
+        BYE)
+            log "session ended cleanly"
+            exit 0
+            ;;
+        *)
+            proto_err "expected TREE or BYE"
+            ;;
+    esac
+done
