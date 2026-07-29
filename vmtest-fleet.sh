@@ -172,7 +172,7 @@ n_src=$(sudo zfs list -H -t snapshot -d 1 -o name ztest/src | grep -c zfsrecvd-)
 check "T8 source pruned to 1 (got $n_src)" test "$n_src" = "1"
 n_dst=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST" | grep -c zfsrecvd-)
 check "T8 dest history kept (got $n_dst)" test "$n_dst" -ge 2
-check "T8 prune logged to source journal" bash -c "sudo journalctl -t zfsrecvd-prune -n 20 --no-pager | grep -q pruning"
+check "T8 prune lines in headless output" grep -q "pruning ztest/src@" /tmp/fleet5.log
 
 echo "=== T9: offline participant is dropped, the rest of the run proceeds ==="
 # nosuchuser@localhost: sshd refuses auth instantly, which is the fastest

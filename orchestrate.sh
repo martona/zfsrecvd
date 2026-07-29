@@ -427,14 +427,22 @@ for key in "${pp_keys[@]}"; do
         echo "NOTE: not pruning [${J_TREE[i]}] on [${J_SRC[i]}]: not every destination finished clean" >&2
         continue
     fi
-    echo "prune-post: [${J_TREE[i]}] on [${J_SRC[i]}] (journalctl -t zfsrecvd-prune there for details)" >&2
-    # systemd-cat: the per-snapshot prune lines land in the SOURCE's
-    # journal instead of on the board -- quiet here, inspectable later
-    # where the pruning actually happened.
-    ssh "${ssh_opts[@]}" "${J_SSH[i]}" \
-        "sudo -n systemd-cat -t zfsrecvd-prune env ZFSRECVD_CONF=${J_RCONF[i]} /etc/zfsrecvd/sendtree.sh --prune-only ${J_TREE[i]}" \
-        </dev/null \
-        || echo "WARNING: prune-post failed for [${J_TREE[i]}] on [${J_SRC[i]}]" >&2
+    echo "prune-post: [${J_TREE[i]}] on [${J_SRC[i]}]" >&2
+    # Headless: the per-snapshot prune lines print inline (prefixed), so
+    # whatever captures the run -- a cron unit's journal, a redirect --
+    # has them. Live board: the screen stays clean and the lines go
+    # nowhere; the result is inspectable on the source itself.
+    if [[ -n "$QUIET" ]]; then
+        ssh "${ssh_opts[@]}" "${J_SSH[i]}" \
+            "sudo -n env ZFSRECVD_CONF=${J_RCONF[i]} /etc/zfsrecvd/sendtree.sh --prune-only ${J_TREE[i]}" \
+            </dev/null >/dev/null 2>&1 \
+            || echo "WARNING: prune-post failed for [${J_TREE[i]}] on [${J_SRC[i]}]" >&2
+    else
+        ssh "${ssh_opts[@]}" "${J_SSH[i]}" \
+            "sudo -n env ZFSRECVD_CONF=${J_RCONF[i]} bash -c 'source /etc/zfsrecvd/run_indented.sh; run_indented \"[${J_SRC[i]}] \" /etc/zfsrecvd/sendtree.sh --prune-only ${J_TREE[i]}'" \
+            </dev/null \
+            || echo "WARNING: prune-post failed for [${J_TREE[i]}] on [${J_SRC[i]}]" >&2
+    fi
 done
 
 #
