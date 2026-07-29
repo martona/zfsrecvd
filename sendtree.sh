@@ -474,6 +474,31 @@ plan_one() {
 
     flags=$(send_flags_for "$ds")
 
+    # Receiver-only snapshots outside the prunable prefixes: only the
+    # SENDER can see this (the receiver never learns our list), and it is
+    # the deleted-at-source tell (or a receiver-side manual snap -- the
+    # wording covers both, they are indistinguishable from here). Warn
+    # only; reclamation is destroy-flag territory (PROTOCOL.md §22).
+    if [[ -z "${ro_noted[$ds]:-}" ]]; then
+        ro_noted[$ds]=1
+        local ro="" rosn ropfx romatched
+        local -a rohl=()
+        IFS=, read -r -a rohl <<<"${have[$ds]:-}"
+        for rosn in "${rohl[@]}"; do
+            [[ -n "$rosn" ]] || continue
+            [[ ",${lsnaps[$ds]:-}," == *",$rosn,"* ]] && continue
+            romatched=""
+            for ropfx in "${prune_prefixes[@]}"; do
+                [[ "$rosn" == "$ropfx"* ]] && { romatched=1; break; }
+            done
+            [[ -n "$romatched" ]] && continue
+            ro="${ro}${ro:+ }@$rosn"
+        done
+        if [[ -n "$ro" ]]; then
+            echo "NOTE: [$ds] receiver-only snapshots (gone or never existed at source): $ro" >&2
+        fi
+    fi
+
     # Pending resume token? Handle it even when the dataset is otherwise up
     # to date: a lingering token blocks all future receives on the dataset.
     if [[ -n "${token[$ds]:-}" ]]; then
@@ -616,6 +641,7 @@ local_newest_common() {
 #                 block the rest of the tree forever.
 declare -A done_ds           # dataset -> handled (any outcome), skip when replanning
 declare -A dskill ok_ds
+declare -A ro_noted          # dataset -> receiver-only snapshot note emitted
 failed=()                    # "<dataset> (reason)" collected for the summary
 strikes=0
 conn_tries=0

@@ -23,11 +23,16 @@
 set -euo pipefail
 source /etc/zfsrecvd/cfgparser.sh
 
-CAND_DAYS=30      # behind-siblings threshold to become a candidate
-GRACE_DAYS=90     # observation -> reclaim-eligible (destroy NOT built)
+# Env-overridable so the machinery can be WATCHED without waiting a
+# month -- safe to turn all the way down precisely because this build
+# cannot destroy anything:
+#   sudo env ZFSRECVD_GC_CAND_DAYS=0 ZFSRECVD_GC_GRACE_DAYS=0 \
+#       ZFSRECVD_CONF=/etc/zfsrecvd/run/<id>/run.conf /etc/zfsrecvd/gc.sh
+CAND_DAYS="${ZFSRECVD_GC_CAND_DAYS:-30}"    # behind-siblings threshold
+GRACE_DAYS="${ZFSRECVD_GC_GRACE_DAYS:-90}"  # observation -> eligible
 
 now=$(date -u +%s)
-say() { echo "GC: $*"; }
+say() { echo "GC:   $*"; }
 
 while IFS= read -r cnroot; do
     [[ "$cnroot" != "$recv_root" ]] || continue
@@ -51,14 +56,12 @@ while IFS= read -r cnroot; do
 
     if (( newest == 0 )); then
         [[ ${#dss[@]} -gt 0 ]] \
-            && say "[$cn] no stamps anywhere; nothing assessed (pre-v2 or foreign subtree)"
+            && say "$cnroot: no stamps anywhere; nothing assessed (pre-v2 or foreign subtree)"
         unset lr osince
         continue
     fi
 
     for ds in "${dss[@]}"; do
-        # CN-relative: the [cn] prefix already names the namespace
-        rel="${ds#"$cnroot"/}"
         if [[ -z "${lr[$ds]:-}" ]]; then
             # never stamped: report true leaves only
             has_stamped_child=""
@@ -69,7 +72,7 @@ while IFS= read -r cnroot; do
                 fi
             done
             [[ -n "$has_stamped_child" ]] \
-                || say "[$cn] UNSTAMPED: $rel (never received under zfsrecvd; old crap?)"
+                || say "$ds: UNSTAMPED -- never received under zfsrecvd"
             continue
         fi
         behind=$(( (newest - lr[$ds]) / 86400 ))
@@ -77,19 +80,19 @@ while IFS= read -r cnroot; do
             if [[ -z "${osince[$ds]:-}" ]]; then
                 stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
                 zfs set "zfsrecvd:orphan-since=$stamp" "$ds" 2>/dev/null || true
-                say "[$cn] ORPHAN CANDIDATE: $rel (${behind}d behind siblings; eligible for reclaim in ${GRACE_DAYS}d -- warn-only build, nothing is destroyed)"
+                say "$ds: ORPHAN CANDIDATE -- ${behind}d behind siblings; eligible for reclaim in ${GRACE_DAYS}d (warn-only build, nothing is destroyed)"
             else
                 oe=$(date -u -d "${osince[$ds]}" +%s 2>/dev/null) || oe=$now
                 left=$(( GRACE_DAYS - (now - oe) / 86400 ))
                 if (( left > 0 )); then
-                    say "[$cn] ORPHAN CANDIDATE: $rel (${behind}d behind siblings; eligible in ${left}d)"
+                    say "$ds: ORPHAN CANDIDATE -- ${behind}d behind siblings; eligible in ${left}d"
                 else
-                    say "[$cn] RECLAIM-ELIGIBLE: $rel (${behind}d behind siblings; grace expired -- warn-only build, NOT destroyed)"
+                    say "$ds: RECLAIM-ELIGIBLE -- ${behind}d behind siblings; grace expired (warn-only build, NOT destroyed)"
                 fi
             fi
         elif [[ -n "${osince[$ds]:-}" ]]; then
             zfs inherit zfsrecvd:orphan-since "$ds" 2>/dev/null || true
-            say "[$cn] recovered: $rel (receiving again; orphan clock cleared)"
+            say "$ds: recovered -- receiving again; orphan clock cleared"
         fi
     done
     unset lr osince

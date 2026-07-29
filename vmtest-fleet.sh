@@ -220,6 +220,7 @@ echo "=== T12: retention grid thins the receiver at ENDTREE ==="
 # hourly=1 culls it while the frontier survives.
 sudo zfs snapshot "$DEST@zfsrecvd-2026-07-28-0800Z"
 sudo zfs snapshot "$DEST@zfsrecvd-2026-07-28-0900Z"
+sudo zfs snapshot "$DEST@keepme-manual"
 sed 's/^destination.*/destination   hourly=1/' ~/fleet-test.conf > ~/fleet-grid.conf
 pre=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST" | grep -c zfsrecvd-)
 /etc/zfsrecvd/fleetrun.sh -c ~/fleet-grid.conf >/tmp/fleet8.log 2>&1
@@ -230,6 +231,8 @@ post=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST" | grep -c zfsrecvd-)
 check "T12 dest thinned ($pre -> $post)" test "$post" -lt "$pre"
 check "T12 yesterday's fakes culled" bash -c "! sudo zfs list -H -t snapshot -d 1 -o name $DEST | grep -q 2026-07-28-0"
 check "T12 frontier survived (got $post)" test "$post" -ge 1
+check "T12 manual snap untouched by grid" sudo zfs list -H "$DEST@keepme-manual"
+grep -q "receiver-only snapshots.*@keepme-manual" /tmp/fleet8.log && ok "T12 receiver-only snap reported" || { bad "T12 receiver-only note"; grep -a "receiver-only" /tmp/fleet8.log; }
 grep -q "gc: \[vmrecv\]" /tmp/fleet8.log && ok "T12 gc stage ran" || { bad "T12 gc stage"; tail -n 20 /tmp/fleet8.log; }
 RJ="${XDG_STATE_HOME:-$HOME/.local/state}/zfsrecvd/runs.jsonl"
 check "T12 runs.jsonl written" test -s "$RJ"
@@ -260,13 +263,15 @@ sudo zfs create ztest/recv/$CN/oldcrap
 sudo zfs create ztest/recv/$CN/stale
 sudo zfs set zfsrecvd:last-recv=2026-01-01T00:00:00Z ztest/recv/$CN/stale
 out=$(sudo env ZFSRECVD_CONF=/etc/zfsrecvd/zfsrecvd.conf /etc/zfsrecvd/gc.sh 2>&1)
-grep -q "UNSTAMPED: oldcrap" <<<"$out" && ok "T15 unstamped crap surfaced" || { bad "T15 unstamped"; echo "$out"; }
-grep -q "ORPHAN CANDIDATE: stale" <<<"$out" && ok "T15 stale flagged" || { bad "T15 stale"; echo "$out"; }
-grep -q "UNSTAMPED: ztest " <<<"$out" && bad "T15 container noise" || ok "T15 containers stay quiet"
+grep -q "oldcrap: UNSTAMPED" <<<"$out" && ok "T15 unstamped crap surfaced" || { bad "T15 unstamped"; echo "$out"; }
+grep -q "stale: ORPHAN CANDIDATE" <<<"$out" && ok "T15 stale flagged" || { bad "T15 stale"; echo "$out"; }
+grep -q "/ztest: UNSTAMPED" <<<"$out" && bad "T15 container noise" || ok "T15 containers stay quiet"
 osv=$(sudo zfs get -H -o value zfsrecvd:orphan-since ztest/recv/$CN/stale)
 check "T15 orphan-since stamped (got $osv)" test "$osv" != "-"
 out2=$(sudo env ZFSRECVD_CONF=/etc/zfsrecvd/zfsrecvd.conf /etc/zfsrecvd/gc.sh 2>&1)
 grep -q "eligible in" <<<"$out2" && ok "T15 countdown on second pass" || { bad "T15 countdown"; echo "$out2"; }
+out3=$(sudo env ZFSRECVD_GC_GRACE_DAYS=0 ZFSRECVD_CONF=/etc/zfsrecvd/zfsrecvd.conf /etc/zfsrecvd/gc.sh 2>&1)
+grep -q "stale: RECLAIM-ELIGIBLE" <<<"$out3" && ok "T15 grace knob turns down" || { bad "T15 knob"; echo "$out3"; }
 check "T15 nothing destroyed" sudo zfs list -H ztest/recv/$CN/oldcrap ztest/recv/$CN/stale
 
 echo
