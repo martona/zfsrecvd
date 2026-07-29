@@ -40,9 +40,11 @@ scripts=(
     ec2helpers.sh
     fleetparser.sh
     fleetrun.sh
+    gc.sh
     listen.sh
     orchestrate.sh
     pp2.sh
+    retain.sh
     run_indented.sh
     send.sh
     sendtree.sh

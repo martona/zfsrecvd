@@ -90,9 +90,9 @@ fi
 #   J_STATE  pending | running | done | skipped
 #   J_RC     numeric exit for done jobs
 #   J_WHY    human reason for skipped / non-zero jobs
-J_STATE=(); J_RC=(); J_WHY=()
+J_STATE=(); J_RC=(); J_WHY=(); J_T0=(); J_SECS=()
 for (( i = 0; i < njobs; i++ )); do
-    J_STATE[i]="pending"; J_RC[i]=""; J_WHY[i]=""
+    J_STATE[i]="pending"; J_RC[i]=""; J_WHY[i]=""; J_T0[i]=""; J_SECS[i]=""
 done
 declare -A src_load=() dest_load=()      # identity -> currently running jobs
 declare -A dead_src=() dead_pair=()      # "src" / "src|dst" -> poisoned this run
@@ -118,8 +118,8 @@ job_label() {   # $1 = job index -> "[src] tree -> [dst]"
 # (sendall used to probe at the right moment; found on the first real T
 # run when three massive sends showed no progress at all).
 job_cmd() {
-    printf "sudo -n env ZFSRECVD_CONF=%s%s bash -c '[ -t 2 ] && export PV_FORCE_FLAG=-f; source /etc/zfsrecvd/run_indented.sh; run_indented \"[%s]>[%s] \" /etc/zfsrecvd/sendtree.sh --no-prune %s@%s %s'" \
-        "${J_RCONF[$1]}" "$2" "${J_SRC[$1]}" "${J_DST[$1]}" \
+    printf "sudo -n env ZFSRECVD_CONF=%s ZFSRECVD_DEST_ID=%s%s bash -c '[ -t 2 ] && export PV_FORCE_FLAG=-f; source /etc/zfsrecvd/run_indented.sh; run_indented \"[%s]>[%s] \" /etc/zfsrecvd/sendtree.sh --no-prune %s@%s %s'" \
+        "${J_RCONF[$1]}" "${J_DST[$1]}" "$2" "${J_SRC[$1]}" "${J_DST[$1]}" \
         "${J_TREE[$1]}" "$snap" "${J_DIAL[$1]}"
 }
 
@@ -151,6 +151,7 @@ pick_job() {
 
 mark_running() {   # $1 = job index
     J_STATE[$1]="running"
+    J_T0[$1]=$(date +%s)
     src_load[${J_SRC[$1]}]=$(( ${src_load[${J_SRC[$1]}]:-0} + 1 ))
     dest_load[${J_DST[$1]}]=$(( ${dest_load[${J_DST[$1]}]:-0} + 1 ))
 }
@@ -162,6 +163,7 @@ on_job_finish() {   # $1 = job index, $2 = rc
     dest_load[$dst]=$(( ${dest_load[$dst]:-1} - 1 ))
     J_STATE[i]="done"
     J_RC[i]="$rc"
+    J_SECS[i]=$(( $(date +%s) - ${J_T0[i]:-$(date +%s)} ))
     case $rc in
         0)  : ;;
         2)  J_WHY[i]="some datasets failed"
@@ -480,6 +482,24 @@ if [[ ${#hards[@]} -gt 0 ]]; then
 fi
 printf 'run summary: %d jobs, %d ok, %d with failed datasets, %d failed, %d skipped\n' \
     "$njobs" "${#oks[@]}" "${#parts[@]}" "${#hards[@]}" "${#skips[@]}" >&2
+
+# One JSON line per job -- the run report's raw feed (PROTOCOL.md §22).
+# /var/log when root made it writable, the state dir otherwise; failure
+# to record is never allowed to fail the run. Field values are all from
+# the fixed identity/tree/why vocabularies, so no JSON escaping games.
+report_dir="/var/log/zfsrecvd"
+if ! mkdir -p "$report_dir" 2>/dev/null || [[ ! -w "$report_dir" ]]; then
+    report_dir="${XDG_STATE_HOME:-$HOME/.local/state}/zfsrecvd"
+    mkdir -p "$report_dir" 2>/dev/null || report_dir=""
+fi
+if [[ -n "$report_dir" ]]; then
+    report_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    for (( i = 0; i < njobs; i++ )); do
+        printf '{"ts":"%s","snap":"%s","src":"%s","tree":"%s","dst":"%s","state":"%s","rc":"%s","why":"%s","secs":%s}\n' \
+            "$report_ts" "$snap" "${J_SRC[i]}" "${J_TREE[i]}" "${J_DST[i]}" \
+            "${J_STATE[i]}" "${J_RC[i]:-}" "${J_WHY[i]:-}" "${J_SECS[i]:-0}"
+    done >> "$report_dir/runs.jsonl" 2>/dev/null || true
+fi
 
 if [[ ${#hards[@]} -gt 0 || ${#skips[@]} -gt 0 ]]; then
     exit 1

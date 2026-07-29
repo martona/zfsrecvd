@@ -15,6 +15,7 @@
 set -euo pipefail
 set -f                       # never glob; we word-split protocol input
 source /etc/zfsrecvd/cfgparser.sh
+source /etc/zfsrecvd/retain.sh
 
 # Field grammars from PROTOCOL.md §3. Anything outside these charsets is
 # rejected before it reaches a zfs command line.
@@ -272,9 +273,13 @@ do_abort() {
 #
 # ---- pruning + stamping (at ENDTREE) ----------------------------------------
 #
-# Keep the newest keep_count snapshots whose names match a prune-prefix,
-# per dataset, across the whole tree in one listing pass. Snapshots outside
-# the prefixes (manual ones, foreign tools') are never touched.
+# With a [retain] grid in the config (fleet runs since D), each dataset's
+# prunable snapshots are thinned by the bucket selector in retain.sh
+# (hourly/daily/weekly/monthly representatives; fail-safe: anything the
+# selector can't reason about is kept). Without one, the legacy behavior:
+# keep the newest keep_count per dataset. Either way only names matching
+# a prune-prefix are candidates; manual and foreign snapshots are never
+# touched.
 prune_tree() {
     local dest_tree="${dest_base}/${tree_root}"
     local snap ds name prefix matched extra i pruned=0
@@ -296,18 +301,31 @@ prune_tree() {
         fi
         psnaps[$ds]="${psnaps[$ds]:-}${psnaps[$ds]:+ }$snap"
     done < <(zfs list -H -r -t snapshot -s creation -o name "$dest_tree" 2>/dev/null || true)
-    local list=()
+    local list=() doomed
     for ds in "${order[@]}"; do
         read -r -a list <<<"${psnaps[$ds]}"
-        extra=$(( ${#list[@]} - keep_count ))
-        for (( i = 0; i < extra; i++ )); do
-            log "pruning ${list[i]}"
-            if zfs destroy "${list[i]}" 2>/dev/null; then
-                pruned=$(( pruned + 1 ))
-            else
-                log "WARNING: failed to prune ${list[i]}"
-            fi
-        done
+        if [[ -n "$retain_spec" ]]; then
+            doomed=$(printf '%s\n' "${list[@]##*@}" | retain_destroy "$retain_spec")
+            while IFS= read -r name; do
+                [[ -n "$name" ]] || continue
+                log "pruning ${ds}@${name}"
+                if zfs destroy "${ds}@${name}" 2>/dev/null; then
+                    pruned=$(( pruned + 1 ))
+                else
+                    log "WARNING: failed to prune ${ds}@${name}"
+                fi
+            done <<<"$doomed"
+        else
+            extra=$(( ${#list[@]} - keep_count ))
+            for (( i = 0; i < extra; i++ )); do
+                log "pruning ${list[i]}"
+                if zfs destroy "${list[i]}" 2>/dev/null; then
+                    pruned=$(( pruned + 1 ))
+                else
+                    log "WARNING: failed to prune ${list[i]}"
+                fi
+            done
+        fi
     done
     if (( pruned > 0 )); then
         log "pruned $pruned snapshots under $dest_tree"

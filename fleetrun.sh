@@ -46,9 +46,11 @@ FLEET_SCRIPTS=(
     ec2helpers.sh
     fleetparser.sh
     fleetrun.sh
+    gc.sh
     listen.sh
     orchestrate.sh
     pp2.sh
+    retain.sh
     run_indented.sh
     send.sh
     sendtree.sh
@@ -211,21 +213,18 @@ echo "minted run CA ($run_id, validity 365d)" >&2
 #
 gen_run_conf() {   # $1 = host identity -> writes $rundir/bundle-$1/run.conf
     local id="$1" out="$rundir/bundle-$1/run.conf"
-    # Interim until D wires the full grid: keep-count is the [retention]
-    # hourly bucket -- source scope for senders, destination scope for
-    # receivers, the max of the two for dual-role hosts (one keep-count
-    # governs both trees on such a host, and keeping more is the safe
-    # direction). Falls back to 6 when the bucket is absent.
+    # keep-count is the sender-side retention: the source scope's hourly
+    # bucket (senders retain hourlies ONLY -- owner doctrine, §22).
+    # Receivers prune by the [retain] grid below; their keep-count is a
+    # fallback for a config that somehow lost its grid. Source wins on
+    # dual-role hosts: the local prune there is sender business.
     local kc="" src_h dst_h
     src_h=$(fleet_ret_bucket "$fleet_ret_source" hourly)
     dst_h=$(fleet_ret_bucket "$fleet_ret_destination" hourly)
     if is_source "$id" && [[ -n "$src_h" ]]; then
         kc="$src_h"
-    fi
-    if is_receiver "$id" && [[ -n "$dst_h" ]]; then
-        if [[ -z "$kc" || "$dst_h" -gt "$kc" ]]; then
-            kc="$dst_h"
-        fi
+    elif is_receiver "$id" && [[ -n "$dst_h" ]]; then
+        kc="$dst_h"
     fi
     [[ -z "$kc" ]] && kc=6
     {
@@ -260,6 +259,10 @@ gen_run_conf() {   # $1 = host identity -> writes $rundir/bundle-$1/run.conf
         fi
         if is_receiver "$id"; then
             printf '[recv-root]\n%s\n' "${fleet_host_recv[$id]}"
+            if [[ -n "$fleet_ret_destination" ]]; then
+                # the deep grid; prune_tree thins by it at ENDTREE
+                printf '[retain]\n%s\n' "$fleet_ret_destination"
+            fi
             if [[ "$fleet_opt_transport" == "haproxy" ]]; then
                 # haproxy owns the public bind; the listener stays local
                 printf '[tcp-addr]\n127.0.0.1\n'
@@ -510,5 +513,19 @@ if (( ${#prov_failed[@]} > 0 )); then
     echo "WARNING: hosts dropped by provisioning/listener failures: ${!prov_failed[*]}" >&2
     orch_rc=1
 fi
+# Orphan GC pass, warn-only (PROTOCOL.md §22): summary-class output,
+# printed in every mode -- these are the loud advance warnings the GC
+# doctrine requires, plus the owner's "old crap" listing.
+for h in "${fleet_receivers[@]}"; do
+    if [[ -n "${prov_failed[$h]:-}" ]]; then
+        continue
+    fi
+    echo "gc: [$h]" >&2
+    fleet_ssh "$(fleet_ssh_dest "$h")" \
+        "sudo -n env ZFSRECVD_CONF=$RUN_REMOTE_BASE/$h/run.conf /etc/zfsrecvd/gc.sh" \
+        </dev/null >&2 \
+        || echo "WARNING: gc pass failed on [$h]" >&2
+done
+
 echo "run $run_id finished (rc=$orch_rc); tearing down" >&2
 exit "$orch_rc"

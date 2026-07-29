@@ -159,6 +159,13 @@ if [[ "${ZFSRECVD_INDENT:-0}" -eq 0 ]]; then
     dest_tag=" -> [${remote}]"
 fi
 
+# Cursor identity (PROTOCOL.md §22): bookmarks are keyed by destination
+# IDENTITY, never the dial name (dials get renamed; identities don't).
+# Orchestrated jobs pass it via ZFSRECVD_DEST_ID; manual runs fall back
+# to the remote argument.
+dest_id="${ZFSRECVD_DEST_ID:-$remote}"
+dest_id="${dest_id//[^A-Za-z0-9._-]/_}"
+
 #
 # ---------- 1.  gather local state (3 zfs invocations) -----------------------
 #
@@ -256,6 +263,43 @@ if [[ "$transport" == "haproxy" ]]; then
         fi
     done
 fi
+
+# Replication cursors (PROTOCOL.md §22 -- zrepl's pattern): ONE bookmark
+# per (dataset, destination) naming the newest snapshot that destination
+# CONFIRMED holding: ds#zfsrecvd-<dest-id>-<snapname>. Bookmarks pin no
+# blocks, so local thinning can outrun every destination and an
+# incremental from the cursor's GUID still works. Advance = create the
+# new cursor, then destroy the OLDER ones for the pair; a crash between
+# the two leaves both and the next advance cleans up.
+cursor_list() {   # $1 = ds -> this pair's cursor bookmark names
+    zfs list -H -t bookmark -d 1 -o name "$1" 2>/dev/null \
+        | grep -F "#zfsrecvd-${dest_id}-" || true
+}
+advance_cursor() {   # $1 = ds, $2 = confirmed snapname
+    local bm="${1}#zfsrecvd-${dest_id}-${2}" old osnap
+    zfs bookmark "${1}@${2}" "$bm" 2>/dev/null || true
+    while IFS= read -r old; do
+        [[ -n "$old" && "$old" != "$bm" ]] || continue
+        osnap="${old#*"#zfsrecvd-${dest_id}-"}"
+        if [[ "$osnap" < "$2" ]]; then
+            zfs destroy "$old" 2>/dev/null || true
+        fi
+    done < <(cursor_list "$1")
+}
+# Newest cursor whose snapshot the receiver still HAS: the incremental
+# base of last resort when no common snapshot survived local thinning.
+cursor_base() {   # $1 = ds -> snapname or ""
+    local bm snap best=""
+    while IFS= read -r bm; do
+        [[ -n "$bm" ]] || continue
+        snap="${bm#*"#zfsrecvd-${dest_id}-"}"
+        [[ ",${have[$1]:-}," == *",$snap,"* ]] || continue
+        if [[ -z "$best" || "$snap" > "$best" ]]; then
+            best="$snap"
+        fi
+    done < <(cursor_list "$1")
+    printf '%s\n' "$best"
+}
 
 # Tear down the coproc and its fds; safe to call twice (and called once
 # more via the EXIT trap). No stray redirections on these execs: an exec
@@ -453,6 +497,7 @@ plan_one() {
             fi
             have[$ds]="${have[$ds]:-}${have[$ds]:+,}$rsn"
             if [[ "$rsn" == "$target" ]]; then
+                advance_cursor "$ds" "$target"
                 return 0
             fi
         else
@@ -474,6 +519,7 @@ plan_one() {
 
     if [[ ",${have[$ds]:-}," == *",$target,"* ]]; then
         utd_n=$(( utd_n + 1 ))
+        advance_cursor "$ds" "$target"
         return 0
     fi
 
@@ -483,7 +529,30 @@ plan_one() {
         est=$(estimate $flags -I "${ds}@${common}" "${ds}@${target}")
         xfer "${ds}@${common}${dest_tag}" "$est" "SEND $ds $common $target $est" \
             $flags -I "${ds}@${common}" "${ds}@${target}"
-        return $?
+        rc=$?
+        [[ $rc -eq 0 ]] && advance_cursor "$ds" "$target"
+        return $rc
+    fi
+
+    # No common snapshot survives -- before falling back to a resend, try
+    # the cursor: the receiver may still hold a snapshot we only remember
+    # as a bookmark (long outage + sender thinning). Single step; -I
+    # needs snapshots, and the gap's intermediates were pruned here anyway.
+    # Volumes drop their -R here: send -R cannot take a bookmark source,
+    # and -R only matters for streams that CREATE the dataset (bootstrap/
+    # full) -- an incremental onto the existing volume is a plain -i.
+    # Encrypted datasets keep their -w.
+    local cbase cflags
+    cbase=$(cursor_base "$ds")
+    if [[ -n "$cbase" ]]; then
+        cflags="$flags"
+        [[ "$cflags" == "-R" ]] && cflags=""
+        est=$(estimate $cflags -i "${ds}#zfsrecvd-${dest_id}-${cbase}" "${ds}@${target}")
+        xfer "${ds}@${cbase} (cursor catch-up)${dest_tag}" "$est" "SEND $ds $cbase $target $est" \
+            $cflags -i "${ds}#zfsrecvd-${dest_id}-${cbase}" "${ds}@${target}"
+        rc=$?
+        [[ $rc -eq 0 ]] && advance_cursor "$ds" "$target"
+        return $rc
     fi
 
     if [[ -z "${have[$ds]:-}" ]]; then
@@ -501,7 +570,9 @@ plan_one() {
             est=$(estimate $flags -I "${ds}@${oldest}" "${ds}@${target}")
             xfer "${ds}@${oldest}${dest_tag}" "$est" "SEND $ds $oldest $target $est" \
                 $flags -I "${ds}@${oldest}" "${ds}@${target}"
-            return $?
+            rc=$?
+            [[ $rc -eq 0 ]] && advance_cursor "$ds" "$target"
+            return $rc
         fi
     fi
 
@@ -510,7 +581,9 @@ plan_one() {
     est=$(estimate $flags "${ds}@${target}")
     xfer "${ds}@${target} (full send)${dest_tag}" "$est" "SEND $ds - $target $est" \
         $flags "${ds}@${target}"
-    return $?
+    rc=$?
+    [[ $rc -eq 0 ]] && advance_cursor "$ds" "$target"
+    return $rc
 }
 
 # Newest local snapshot (walking newest to oldest) that the receiver also

@@ -74,7 +74,7 @@ user   marton
 port   $RUNPORT
 
 [retention]
-source        hourly=24 daily=7
+source        hourly=24
 destination   hourly=48 daily=30
 
 [hosts]
@@ -193,8 +193,6 @@ echo "=== T10: haproxy transport: TLS via haproxy, identity via PP2 ==="
 # there is no TLS env var, so the CN the allowed_hosts check passes can
 # only have come from a real haproxy-emitted PROXY v2 header.
 sed '/^port/a transport   haproxy' ~/fleet-test.conf > ~/fleet-ha.conf
-pre=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST" | grep -c zfsrecvd-)
-pre2=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST2" | grep -c zfsrecvd-)
 last_min=$(date +%H%M)
 for _ in $(seq 1 130); do [ "$(date +%H%M)" != "$last_min" ] && break; sleep 1; done
 sudo dd if=/dev/urandom of=/dev/zvol/ztest/src/vol bs=1M count=4 oflag=direct 2>/dev/null
@@ -202,10 +200,11 @@ sudo dd if=/dev/urandom of=/dev/zvol/ztest/src/vol bs=1M count=4 oflag=direct 2>
 rc=$?
 check "T10 rc=0" test "$rc" -eq 0
 grep -q "0 failed" /tmp/fleet7.log && ok "T10 clean" || { bad "T10 failures"; tail -n 40 /tmp/fleet7.log; }
-post=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST" | grep -c zfsrecvd-)
-post2=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST2" | grep -c zfsrecvd-)
-check "T10 incremental on dest ($pre -> $post)"    test "$post"  -gt "$pre"
-check "T10 incremental on dest2 ($pre2 -> $post2)" test "$post2" -gt "$pre2"
+# count-based assertions are wrong under the grid (same-hour snaps thin
+# to rep+frontier); what matters is that the NEW snapshot arrived.
+new_src=$(sudo zfs list -H -t snapshot -d 1 -o name ztest/src | tail -n 1); new_src="${new_src#*@}"
+sudo zfs list -H -t snapshot -d 1 -o name "$DEST"  | grep -q "@$new_src\$" && ok "T10 new snapshot on dest"  || bad "T10 dest missing $new_src"
+sudo zfs list -H -t snapshot -d 1 -o name "$DEST2" | grep -q "@$new_src\$" && ok "T10 new snapshot on dest2" || bad "T10 dest2 missing $new_src"
 
 echo "=== T11: haproxy teardown ==="
 check "T11 ha unit (sender) gone"   bash -c "! systemctl is-active --quiet zfsrecvd-ha-$CN"
@@ -214,10 +213,66 @@ check "T11 ha unit vmrecv2 gone"    bash -c "! systemctl is-active --quiet zfsre
 check "T11 no run ports left"       bash -c "! ss -tln | grep -E ':(15299|15300|15301|15363|15364) ' | grep -q ."
 check "T11 teardown quiet (no spurious warnings)" bash -c "! grep -q 'WARNING.*still active' /tmp/fleet7.log && ! grep -q 'could not stop' /tmp/fleet7.log"
 
+echo "=== T12: retention grid thins the receiver at ENDTREE ==="
+# The suite's real snapshots all live in one UTC hour, where hourly=N
+# correctly keeps rep+frontier and thins nothing -- so fabricate
+# yesterday's history by NAME (names are the grid's clock) and assert
+# hourly=1 culls it while the frontier survives.
+sudo zfs snapshot "$DEST@zfsrecvd-2026-07-28-0800Z"
+sudo zfs snapshot "$DEST@zfsrecvd-2026-07-28-0900Z"
+sed 's/^destination.*/destination   hourly=1/' ~/fleet-test.conf > ~/fleet-grid.conf
+pre=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST" | grep -c zfsrecvd-)
+/etc/zfsrecvd/fleetrun.sh -c ~/fleet-grid.conf >/tmp/fleet8.log 2>&1
+rc=$?
+check "T12 rc=0" test "$rc" -eq 0
+grep -q "0 failed" /tmp/fleet8.log && ok "T12 clean" || { bad "T12 failures"; tail -n 30 /tmp/fleet8.log; }
+post=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST" | grep -c zfsrecvd-)
+check "T12 dest thinned ($pre -> $post)" test "$post" -lt "$pre"
+check "T12 yesterday's fakes culled" bash -c "! sudo zfs list -H -t snapshot -d 1 -o name $DEST | grep -q 2026-07-28-0"
+check "T12 frontier survived (got $post)" test "$post" -ge 1
+grep -q "gc: \[vmrecv\]" /tmp/fleet8.log && ok "T12 gc stage ran" || { bad "T12 gc stage"; tail -n 20 /tmp/fleet8.log; }
+RJ="${XDG_STATE_HOME:-$HOME/.local/state}/zfsrecvd/runs.jsonl"
+check "T12 runs.jsonl written" test -s "$RJ"
+tail -n 2 "$RJ" | grep -q '"state":"done","rc":"0"' && ok "T12 jsonl records ok jobs" || { bad "T12 jsonl content"; tail -n 3 "$RJ"; }
+
+echo "=== T13: replication cursors: exactly one per (dataset, dest) ==="
+n_c1=$(sudo zfs list -H -t bookmark -d 1 -o name ztest/src | grep -c '#zfsrecvd-vmrecv-')
+n_c2=$(sudo zfs list -H -t bookmark -d 1 -o name ztest/src | grep -c '#zfsrecvd-vmrecv2-')
+check "T13 one cursor for vmrecv (got $n_c1)"  test "$n_c1" = "1"
+check "T13 one cursor for vmrecv2 (got $n_c2)" test "$n_c2" = "1"
+
+echo "=== T14: cursor catch-up after total source snapshot loss ==="
+# destroy EVERY source snapshot (bookmarks survive); the next run has no
+# common snapshot and must send -i from the cursor instead of a full.
+sudo zfs list -H -t snapshot -r -o name ztest/src | while read -r s; do sudo zfs destroy "$s"; done
+last_min=$(date +%H%M)
+for _ in $(seq 1 130); do [ "$(date +%H%M)" != "$last_min" ] && break; sleep 1; done
+/etc/zfsrecvd/fleetrun.sh -c ~/fleet-test.conf >/tmp/fleet9.log 2>&1
+rc=$?
+check "T14 rc=0" test "$rc" -eq 0
+grep -q "0 failed" /tmp/fleet9.log && ok "T14 clean" || { bad "T14 failures"; tail -n 40 /tmp/fleet9.log; }
+grep -q "(cursor catch-up)" /tmp/fleet9.log && ok "T14 cursor path taken" || { bad "T14 no cursor path"; grep -a "ztest/src " /tmp/fleet9.log | tail -n 10; }
+new_src=$(sudo zfs list -H -t snapshot -d 1 -o name ztest/src | tail -n 1); new_src="${new_src#*@}"
+sudo zfs list -H -t snapshot -d 1 -o name "$DEST" | grep -q "@$new_src\$" && ok "T14 catch-up landed on dest" || bad "T14 dest missing $new_src"
+
+echo "=== T15: orphan GC, warn-only ==="
+sudo zfs create ztest/recv/$CN/oldcrap
+sudo zfs create ztest/recv/$CN/stale
+sudo zfs set zfsrecvd:last-recv=2026-01-01T00:00:00Z ztest/recv/$CN/stale
+out=$(sudo env ZFSRECVD_CONF=/etc/zfsrecvd/zfsrecvd.conf /etc/zfsrecvd/gc.sh 2>&1)
+grep -q "UNSTAMPED: oldcrap" <<<"$out" && ok "T15 unstamped crap surfaced" || { bad "T15 unstamped"; echo "$out"; }
+grep -q "ORPHAN CANDIDATE: stale" <<<"$out" && ok "T15 stale flagged" || { bad "T15 stale"; echo "$out"; }
+grep -q "UNSTAMPED: ztest " <<<"$out" && bad "T15 container noise" || ok "T15 containers stay quiet"
+osv=$(sudo zfs get -H -o value zfsrecvd:orphan-since ztest/recv/$CN/stale)
+check "T15 orphan-since stamped (got $osv)" test "$osv" != "-"
+out2=$(sudo env ZFSRECVD_CONF=/etc/zfsrecvd/zfsrecvd.conf /etc/zfsrecvd/gc.sh 2>&1)
+grep -q "eligible in" <<<"$out2" && ok "T15 countdown on second pass" || { bad "T15 countdown"; echo "$out2"; }
+check "T15 nothing destroyed" sudo zfs list -H ztest/recv/$CN/oldcrap ztest/recv/$CN/stale
+
 echo
 echo "=== RESULT: $PASS passed, $FAIL failed ==="
 if [ "$FAIL" -gt 0 ]; then
-    for f in /tmp/fleet1.log /tmp/fleet2.log /tmp/fleet3.log /tmp/fleet4.log /tmp/fleet5.log /tmp/fleet6.log /tmp/fleet7.log; do
+    for f in /tmp/fleet1.log /tmp/fleet2.log /tmp/fleet3.log /tmp/fleet4.log /tmp/fleet5.log /tmp/fleet6.log /tmp/fleet7.log /tmp/fleet8.log /tmp/fleet9.log; do
         [ -f "$f" ] && { echo "--- $f tail ---"; tail -n 25 "$f"; }
     done
     for u in zfsrecvd-run-vmrecv zfsrecvd-run-vmrecv2 zfsrecvd-ha-vmrecv zfsrecvd-ha-vmrecv2; do

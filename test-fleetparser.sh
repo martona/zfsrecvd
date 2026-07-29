@@ -18,7 +18,7 @@ port   15299
 transport haproxy
 
 [retention]
-source        hourly=24 daily=7
+source        hourly=24
 destination   hourly=48 daily=30 weekly=8 monthly=12
 
 [hosts]
@@ -108,6 +108,9 @@ transport pigeon' 2 "transport must be"
 
 expect_fatal badbucket '[retention]
 source fortnightly=3' 2 "bad retention bucket"
+
+expect_fatal srcdeep '[retention]
+source hourly=4 daily=2' 2 "hourlies only"
 
 expect_fatal dataport '[hosts]
 b recv=t/r data=b.lan:9999' 2 "reserved"

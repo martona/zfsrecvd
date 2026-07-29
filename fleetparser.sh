@@ -68,6 +68,11 @@ _fleet_ret_line() {
     for kv in "$@"; do
         [[ "$kv" =~ ^(hourly|daily|weekly|monthly)=[0-9]+$ ]] \
             || _fleet_fatal "bad retention bucket '$kv' (hourly|daily|weekly|monthly=N)"
+        # Owner doctrine (2026-07-29): senders retain HOURLIES only; the
+        # deep grid lives on receivers. Reject rather than ignore.
+        if [[ "$scope" == "source" && "$kv" != hourly=* ]]; then
+            _fleet_fatal "source scope retains hourlies only ('$kv' belongs in the destination scope)"
+        fi
     done
     case "$scope" in
         source)      fleet_ret_source="$*" ;;
