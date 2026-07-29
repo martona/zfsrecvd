@@ -26,10 +26,10 @@ source /etc/zfsrecvd/ec2helpers.sh
 # One orchestrate/deploy at a time across the estate.
 orch_lock
 
-# Running under sudo makes ssh use root's keys and known_hosts, which is a
-# common source of baffling auth/host-key failures. Root is not needed here.
+# Running under sudo makes ssh use root's keys, which is a common source
+# of baffling auth failures. Root is not needed here.
 if [[ ${EUID} -eq 0 && -n "${SUDO_USER:-}" ]]; then
-    echo "WARNING: running under sudo; ssh will use root's keys and known_hosts." >&2
+    echo "WARNING: running under sudo; ssh will use root's keys, not yours." >&2
     echo "deploy.sh does not need root -- run it as your own user." >&2
 fi
 
@@ -117,10 +117,8 @@ for host in "${targets[@]}"; do
     user="${target_user[$host]}"
     echo "Deploying to [$user@$host]" >&2
     set +e
-    # accept-new: trust a host on first contact, so adding a brand-new box
-    # to the config just works; a changed key on a known host still fails.
     tar -C "$src_dir" -cf - "${scripts[@]}" \
-        | ssh -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$user@$host" "$remote_cmd"
+        | ssh "${ssh_opts[@]}" "$user@$host" "$remote_cmd"
     rc=$?
     set -e
     if [[ $rc -eq 0 ]]; then

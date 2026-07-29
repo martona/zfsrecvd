@@ -1,10 +1,26 @@
 #!/usr/bin/env bash
-# Shared helpers for orchestrate.sh and deploy.sh: the estate lock, and the
-# EC2 wake/stop logic.
+# Shared helpers for orchestrate.sh, deploy.sh, and fleetrun.sh: the ssh
+# option set, the estate lock, and the EC2 wake/stop logic.
 # Source this after cfgparser.sh. Call orch_lock to take the shared lock,
 # and ec2_maybe_start once to wake the fleet; instances it starts -- plus
 # any debt a crashed earlier run left behind -- are stopped by an EXIT trap
 # it installs.
+
+# Every control-plane ssh in the project rides these options. Fleet boxes
+# answer to several names each (bare hostname, .lan, .local, tailscale
+# with and without .ts.net), so known_hosts can never stay coherent:
+# first contact under yet another name would prompt, and a name that now
+# points at a rebuilt or different box would hard-fail the run. So we
+# never prompt, accept whatever key the peer presents, and keep the
+# operator's real known_hosts out of it entirely (never read, never
+# written). LogLevel=ERROR mutes the "Permanently added ..." notice this
+# would otherwise print on every single connection; real errors still
+# come through. Host authenticity is treated as a property of the
+# LAN/tailnet; the data path authenticates itself with mTLS either way.
+ssh_opts=( -o ConnectTimeout=10 -o BatchMode=yes
+           -o StrictHostKeyChecking=no
+           -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null
+           -o LogLevel=ERROR )
 
 # Take the lock shared by orchestrate.sh and deploy.sh: swapping scripts
 # under a run in flight would mix script generations within one run, so the

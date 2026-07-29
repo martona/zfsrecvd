@@ -131,7 +131,7 @@ is_source() {
 fleet_ssh() {   # <user@addr> <command...>
     local dest="$1"
     shift
-    ssh -o ConnectTimeout=10 -o BatchMode=yes "$dest" "$@"
+    ssh "${ssh_opts[@]}" "$dest" "$@"
 }
 
 fleet_teardown() {

@@ -106,7 +106,7 @@ run_serial() {
     for ((i = 0; i < ${#hosts[@]}; i++)); do
         echo "Connecting to [${users[i]}@${hosts[i]}] to execute sendall.sh" >&2
         set +e
-        ssh "${ssh_tty_flag[@]}" -o ConnectTimeout=10 -o BatchMode=yes \
+        ssh "${ssh_tty_flag[@]}" "${ssh_opts[@]}" \
             "${users[i]}@${hosts[i]}" "$(remote_cmd_for "$i")"
         rc=$?
         set -e
@@ -123,7 +123,7 @@ run_parallel_plain() {
     local i rc
     for ((i = 0; i < ${#hosts[@]}; i++)); do
         echo "Connecting to [${users[i]}@${hosts[i]}] to execute sendall.sh" >&2
-        ssh -o ConnectTimeout=10 -o BatchMode=yes \
+        ssh "${ssh_opts[@]}" \
             "${users[i]}@${hosts[i]}" "$(remote_cmd_for "$i")" </dev/null &
         pids[i]=$!
     done
@@ -173,7 +173,7 @@ run_parallel_live() {
 
     echo "Orchestrating ${n} hosts in parallel (logs: $logdir)" >&2
     for ((i = 0; i < n; i++)); do
-        ssh -tt -o ConnectTimeout=10 -o BatchMode=yes "${users[i]}@${hosts[i]}" \
+        ssh -tt "${ssh_opts[@]}" "${users[i]}@${hosts[i]}" \
             "stty cols $remote_cols 2>/dev/null || true; exec $(remote_cmd_for "$i")" \
             </dev/null >"$logdir/${hosts[i]}.log" 2>&1 &
         pids[i]=$!

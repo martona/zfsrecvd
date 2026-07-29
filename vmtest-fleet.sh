@@ -60,9 +60,8 @@ sleep 1
 check "legacy listener up on 5299" bash -c 'ss -tln | grep -q ":5299 "'
 static_sum=$(sudo sha256sum /etc/zfsrecvd/client.pem /etc/zfsrecvd/server.pem /etc/zfsrecvd/ca.pem | sha256sum)
 
-# self-ssh must work for both names fleetrun will dial
-ssh-keyscan -H localhost >> ~/.ssh/known_hosts 2>/dev/null
-ssh-keyscan -H "$CN" >> ~/.ssh/known_hosts 2>/dev/null
+# no ssh-keyscan needed: fleet ssh ignores known_hosts entirely (ssh_opts
+# in ec2helpers.sh) -- that behavior is itself under test here
 
 cat > ~/fleet-test.conf <<EOF
 [options]
