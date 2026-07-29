@@ -44,7 +44,6 @@ scripts=(
     orchestrate.sh
     run_indented.sh
     send.sh
-    sendall.sh
     sendtree.sh
     zfsrecvd.sh
 )

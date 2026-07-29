@@ -2,9 +2,17 @@
 # zfsrecvd protocol 2.0 sender: replicates a dataset tree over one TLS
 # session. See PROTOCOL.md for the wire contract.
 #
-# Usage: sendtree.sh [--single] <dataset[@snap]> <remote_host>
-#   --single: send only the named dataset, not its descendants (send.sh
-#             execs into this for manual one-dataset runs).
+# Usage: sendtree.sh [--single] [--no-prune] <dataset[@snap]> <remote_host>
+#        sendtree.sh --prune-only <dataset>
+#   --single:     send only the named dataset, not its descendants (send.sh
+#                 execs into this for manual one-dataset runs).
+#   --no-prune:   skip the local prune pass. Orchestrated (T) runs use this:
+#                 with several destinations sending the same tree
+#                 concurrently, pruning belongs to the orchestrator's
+#                 prune-post stage, after ALL of them finished.
+#   --prune-only: no session at all -- just the local prune pass over the
+#                 tree (every dataset, not only ok ones: the orchestrator
+#                 only invokes this when the whole tree replicated clean).
 #   Without @snap, the newest snapshot of the root dataset is the target;
 #   descendants lacking that snapshot are skipped with a warning.
 #
@@ -27,15 +35,15 @@ set -euo pipefail
 set -f                       # never glob; plenty of protocol word-splitting
 source /etc/zfsrecvd/cfgparser.sh
 
-# When we run under run_indented (see sendall.sh), every line we emit grows
+# When we run under run_indented (see orchestrate.sh), every line we emit grows
 # by ZFSRECVD_INDENT columns of prefix before reaching the terminal. pv sizes
 # its progress line to the terminal width (or assumes 80 when it can't tell),
 # so an unshrunk line wraps once prefixed, and every \r-refresh then lands on
 # a fresh row instead of overwriting in place. Shrink pv to compensate.
 PV_WIDTH_FLAG=""
 if [[ "${ZFSRECVD_INDENT:-0}" -gt 0 ]]; then
-    # Width source, in order: ZFSRECVD_COLS (frozen once at sendall or
-    # orchestrate startup -- stable against mid-run resizes), else a live
+    # Width source, in order: ZFSRECVD_COLS (frozen once at orchestrate
+    # startup -- stable against mid-run resizes), else a live
     # probe of the controlling tty. In the probe, 2>/dev/null must come
     # FIRST: redirections apply left to right, and a failed /dev/tty open
     # reports to whatever stderr is at that moment.
@@ -52,19 +60,84 @@ fi
 # ---------- 0.  arguments ----------------------------------------------------
 #
 single=""                    # nonempty: one dataset only, no descendants
-if [[ "${1:-}" == "--single" ]]; then
-    single=1
-    shift
-fi
-if [[ $# -lt 2 ]]; then
-    echo "Usage: $0 [--single] <dataset[@snap]> <remote_host>" >&2
+no_prune=""                  # nonempty: skip the local prune pass (T fan-out)
+prune_only=""                # nonempty: ONLY the local prune pass (T post-stage)
+prune_all=""                 # prune gate: every dataset, not just ok_ds
+while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+        --single)     single=1;     shift ;;
+        --no-prune)   no_prune=1;   shift ;;
+        --prune-only) prune_only=1; shift ;;
+        *) echo "Usage: $0 [--single] [--no-prune] <dataset[@snap]> <remote_host>" >&2
+           echo "       $0 --prune-only <dataset>" >&2
+           exit 64 ;;
+    esac
+done
+if [[ $# -lt 2 && -z "$prune_only" ]] || [[ $# -lt 1 ]]; then
+    echo "Usage: $0 [--single] [--no-prune] <dataset[@snap]> <remote_host>" >&2
+    echo "       $0 --prune-only <dataset>" >&2
     exit 64
 fi
 arg="$1"
-remote="$2"          # extra legacy arguments (old sentinel file) are ignored
+remote="${2:-}"      # extra legacy arguments (old sentinel file) are ignored
+
+# Local prune, same policy as the receiver (keep the newest keep_count
+# prunable-prefix snapshots per dataset), but normally restricted to
+# datasets that replicated cleanly: pruning under a failed dataset could
+# destroy the very snapshot a future incremental needs as its base.
+# --prune-only lifts that restriction via prune_all (the orchestrator
+# calls it only after every destination of the tree finished clean).
+# Defined here, ahead of the session machinery, because the --prune-only
+# path below runs it and exits without ever gathering session state.
+prune_local() {
+    local snap ds name prefix matched extra i
+    declare -A psnaps=()     # dataset -> space-joined prunable snaps, oldest first
+    local order=()
+    while IFS= read -r snap; do
+        ds="${snap%@*}"
+        name="${snap#*@}"
+        [[ -n "$prune_all" || -n "${ok_ds[$ds]:-}" ]] || continue
+        matched=""
+        for prefix in "${prune_prefixes[@]}"; do
+            if [[ "$name" == "$prefix"* ]]; then
+                matched=1
+                break
+            fi
+        done
+        [[ -n "$matched" ]] || continue
+        if [[ -z "${psnaps[$ds]:-}" ]]; then
+            order+=( "$ds" )
+        fi
+        psnaps[$ds]="${psnaps[$ds]:-}${psnaps[$ds]:+ }$snap"
+    done < <(
+        if [[ -n "$single" ]]; then
+            zfs list -H -t snapshot -s creation -d 1 -o name "$root" 2>/dev/null
+        else
+            zfs list -H -r -t snapshot -s creation -o name "$root" 2>/dev/null
+        fi || true
+    )
+    local list=()
+    for ds in "${order[@]}"; do
+        read -r -a list <<<"${psnaps[$ds]}"
+        extra=$(( ${#list[@]} - keep_count ))
+        for (( i = 0; i < extra; i++ )); do
+            echo "pruning ${list[i]}" >&2
+            zfs destroy "${list[i]}" 2>/dev/null \
+                || echo "WARNING: failed to prune old local snapshot: ${list[i]}" >&2
+        done
+    done
+}
+
+if [[ -n "$prune_only" ]]; then
+    root="${arg%%@*}"
+    prune_all=1
+    prune_local
+    exit 0
+fi
 
 # Split dataset from target snapshot; with no @snap, the newest snapshot of
-# the root names the run (sendall just created it, so newest is the run's).
+# the root names the run (manual runs -- orchestrated jobs pass @snap
+# explicitly, pinned to the snapshot-pre stage's run name).
 root="" target=""
 if [[ "$arg" == *@* ]]; then
     root="${arg%@*}"
@@ -548,49 +621,12 @@ done
 #
 # ---------- 6.  local prune (only datasets that fully succeeded) --------------
 #
-# Same policy as the receiver (keep the newest keep_count prunable-prefix
-# snapshots per dataset), but restricted to datasets that replicated
-# cleanly: pruning under a failed dataset could destroy the very snapshot
-# a future incremental needs as its base.
-prune_local() {
-    local snap ds name prefix matched extra i
-    declare -A psnaps=()     # dataset -> space-joined prunable snaps, oldest first
-    local order=()
-    while IFS= read -r snap; do
-        ds="${snap%@*}"
-        name="${snap#*@}"
-        [[ -n "${ok_ds[$ds]:-}" ]] || continue
-        matched=""
-        for prefix in "${prune_prefixes[@]}"; do
-            if [[ "$name" == "$prefix"* ]]; then
-                matched=1
-                break
-            fi
-        done
-        [[ -n "$matched" ]] || continue
-        if [[ -z "${psnaps[$ds]:-}" ]]; then
-            order+=( "$ds" )
-        fi
-        psnaps[$ds]="${psnaps[$ds]:-}${psnaps[$ds]:+ }$snap"
-    done < <(
-        if [[ -n "$single" ]]; then
-            zfs list -H -t snapshot -s creation -d 1 -o name "$root" 2>/dev/null
-        else
-            zfs list -H -r -t snapshot -s creation -o name "$root" 2>/dev/null
-        fi || true
-    )
-    local list=()
-    for ds in "${order[@]}"; do
-        read -r -a list <<<"${psnaps[$ds]}"
-        extra=$(( ${#list[@]} - keep_count ))
-        for (( i = 0; i < extra; i++ )); do
-            echo "pruning ${list[i]}" >&2
-            zfs destroy "${list[i]}" 2>/dev/null \
-                || echo "WARNING: failed to prune old local snapshot: ${list[i]}" >&2
-        done
-    done
-}
-prune_local
+# prune_local is defined up in section 0 (the --prune-only path needs it
+# early). Under --no-prune the orchestrator owns pruning: it runs the
+# prune-post stage once per tree, after every destination finished.
+if [[ -z "$no_prune" ]]; then
+    prune_local
+fi
 
 echo "Tree [$root@$target]${dest_tag}: $sent_n sent, $utd_n up to date, $skip_n skipped, ${#failed[@]} failed" >&2
 if [[ ${#failed[@]} -gt 0 ]]; then

@@ -8,12 +8,14 @@
 #   * sends          (bash array)
 #   * prune_prefixes (bash array)
 #   * orchtargets    (bash array)
+#   * orchjobs       (bash array)
+#   * orchworkers    (string, numeric)
 #   * orchec2up      (bash array)
 
 CFG="${ZFSRECVD_CONF:-/etc/zfsrecvd/zfsrecvd.conf}"
 
 recv_root="" tcp_port="" tcp_addr="" keep_count="" cert_dir="" allowed_hosts=()
-sends=() prune_prefixes=() orchtargets=() orchec2up=()
+sends=() prune_prefixes=() orchtargets=() orchjobs=() orchec2up=() orchworkers=""
 
 current=""
 while IFS= read -r line || [[ -n "$line" ]]; do
@@ -36,6 +38,8 @@ while IFS= read -r line || [[ -n "$line" ]]; do
         sends)                 sends+=( "$line" ) ;;
         prune-prefixes)        prune_prefixes+=( "$line" ) ;;
         orchestrator-targets)  orchtargets+=( "$line" ) ;;
+        orchestrator-jobs)     orchjobs+=( "$line" ) ;;
+        orchestrator-workers)  orchworkers="$line" ;;
         orchestrator-ec2up)    orchec2up+=( "$line" ) ;;
     esac
 done < "$CFG"
