@@ -20,8 +20,8 @@ DEST="ztest/recv/$CN/ztest/src"
 DEST2="ztest/recv2/$CN/ztest/src"
 
 echo "=== setup ==="
-sudo systemctl stop "zfsrecvd-run-*" zfsrecvd-test 2>/dev/null
-sudo systemctl reset-failed "zfsrecvd-run-*" zfsrecvd-test 2>/dev/null
+sudo systemctl stop "zfsrecvd-run-*" "zfsrecvd-ha-*" zfsrecvd-test 2>/dev/null
+sudo systemctl reset-failed "zfsrecvd-run-*" "zfsrecvd-ha-*" zfsrecvd-test 2>/dev/null
 rm -rf /tmp/zfsrecvd-fleet.* 2>/dev/null
 sleep 0.5
 sudo zpool destroy ztest 2>/dev/null
@@ -187,13 +187,38 @@ check "T9 rc=1 (degraded run)" test "$rc" -eq 1
 grep -q "dropping its jobs" /tmp/fleet6.log && ok "T9 offline host dropped" || { bad "T9 drop message"; tail -n 20 /tmp/fleet6.log; }
 grep -q "run summary: 2 jobs, 2 ok" /tmp/fleet6.log && ok "T9 remaining jobs ran clean" || { bad "T9 summary"; tail -n 20 /tmp/fleet6.log; }
 
+echo "=== T10: haproxy transport: TLS via haproxy, identity via PP2 ==="
+# data landing at all proves the PP2 path end to end: in haproxy mode
+# there is no TLS env var, so the CN the allowed_hosts check passes can
+# only have come from a real haproxy-emitted PROXY v2 header.
+sed '/^port/a transport   haproxy' ~/fleet-test.conf > ~/fleet-ha.conf
+pre=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST" | grep -c zfsrecvd-)
+pre2=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST2" | grep -c zfsrecvd-)
+last_min=$(date +%H%M)
+for _ in $(seq 1 130); do [ "$(date +%H%M)" != "$last_min" ] && break; sleep 1; done
+sudo dd if=/dev/urandom of=/dev/zvol/ztest/src/vol bs=1M count=4 oflag=direct 2>/dev/null
+/etc/zfsrecvd/fleetrun.sh -c ~/fleet-ha.conf >/tmp/fleet7.log 2>&1
+rc=$?
+check "T10 rc=0" test "$rc" -eq 0
+grep -q "0 failed" /tmp/fleet7.log && ok "T10 clean" || { bad "T10 failures"; tail -n 40 /tmp/fleet7.log; }
+post=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST" | grep -c zfsrecvd-)
+post2=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST2" | grep -c zfsrecvd-)
+check "T10 incremental on dest ($pre -> $post)"    test "$post"  -gt "$pre"
+check "T10 incremental on dest2 ($pre2 -> $post2)" test "$post2" -gt "$pre2"
+
+echo "=== T11: haproxy teardown ==="
+check "T11 ha unit (sender) gone"   bash -c "! systemctl is-active --quiet zfsrecvd-ha-$CN"
+check "T11 ha unit vmrecv gone"     bash -c "! systemctl is-active --quiet zfsrecvd-ha-vmrecv"
+check "T11 ha unit vmrecv2 gone"    bash -c "! systemctl is-active --quiet zfsrecvd-ha-vmrecv2"
+check "T11 no run ports left"       bash -c "! ss -tln | grep -E ':(15299|15300|15301|15363|15364) ' | grep -q ."
+
 echo
 echo "=== RESULT: $PASS passed, $FAIL failed ==="
 if [ "$FAIL" -gt 0 ]; then
-    for f in /tmp/fleet1.log /tmp/fleet2.log /tmp/fleet3.log /tmp/fleet4.log /tmp/fleet5.log /tmp/fleet6.log; do
+    for f in /tmp/fleet1.log /tmp/fleet2.log /tmp/fleet3.log /tmp/fleet4.log /tmp/fleet5.log /tmp/fleet6.log /tmp/fleet7.log; do
         [ -f "$f" ] && { echo "--- $f tail ---"; tail -n 25 "$f"; }
     done
-    for u in zfsrecvd-run-vmrecv zfsrecvd-run-vmrecv2; do
+    for u in zfsrecvd-run-vmrecv zfsrecvd-run-vmrecv2 zfsrecvd-ha-vmrecv zfsrecvd-ha-vmrecv2; do
         echo "--- $u journal ---"
         sudo journalctl -u "$u" -n 30 --no-pager 2>/dev/null | tail -n 30
     done

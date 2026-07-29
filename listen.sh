@@ -4,7 +4,18 @@
 
 source /etc/zfsrecvd/cfgparser.sh
 
-echo "Starting ZFS receive listener on $tcp_addr:$tcp_port" >&2
+echo "Starting ZFS receive listener on $tcp_addr:$tcp_port (transport: $transport)" >&2
+
+# H transport (PROTOCOL.md §20): haproxy owns TLS on the public port and
+# forwards plaintext to us on loopback, prepending a PROXY protocol v2
+# header with the verified client CN -- zfsrecvd.sh parses it fail-closed
+# via pp2.sh. This listener must never be reachable beyond loopback; the
+# generated run config pins tcp-addr to 127.0.0.1.
+if [[ "$transport" == "haproxy" ]]; then
+    exec /usr/bin/socat -b 262144 \
+        "TCP-LISTEN:${tcp_port},bind=${tcp_addr},reuseaddr,fork,max-children=16,nodelay" \
+        EXEC:'/etc/zfsrecvd/zfsrecvd.sh'
+fi
 
 # Options assembled in a variable on purpose: a missing "\" in the old
 # backslash-continued form silently detached the remaining options into a

@@ -15,6 +15,7 @@ cat > "$FX/good.conf" <<'EOF'
 [options]
 user   marton
 port   15299
+transport haproxy
 
 [retention]
 source        hourly=24 daily=7
@@ -34,7 +35,7 @@ bergamo    tank/backup   cp4
 EOF
 
 out=$(bash -c "source '$FP'; fleet_parse '$FX/good.conf';
-    echo \"user=\$fleet_opt_user port=\$fleet_opt_port workers=\$fleet_opt_workers\";
+    echo \"user=\$fleet_opt_user port=\$fleet_opt_port workers=\$fleet_opt_workers transport=\$fleet_opt_transport\";
     echo \"sources=\${fleet_sources[*]}\";
     echo \"receivers=\${fleet_receivers[*]}\";
     echo \"participants=\${fleet_participants[*]}\";
@@ -47,7 +48,7 @@ out=$(bash -c "source '$FP'; fleet_parse '$FX/good.conf';
     echo \"ec2_cp4=\${fleet_host_ec2[cp4]}\"" 2>&1)
 rc=$?
 [[ $rc -eq 0 ]] && ok "good.conf parses (rc=0)" || { bad "good.conf rc=$rc"; echo "$out"; }
-grep -q "user=marton port=15299 workers=8" <<<"$out" && ok "options + workers default" || bad "options: $out"
+grep -q "user=marton port=15299 workers=8 transport=haproxy" <<<"$out" && ok "options + workers default + transport" || bad "options: $out"
 grep -q "sources=jupiter sapphire bergamo" <<<"$out" && ok "sources order/dedup" || bad "sources: $out"
 grep -q "receivers=bergamo cp4 zeus" <<<"$out" && ok "receivers order/dedup" || bad "receivers: $out"
 grep -q "participants=jupiter sapphire bergamo cp4 zeus" <<<"$out" && ok "participants union" || bad "participants: $out"
@@ -101,6 +102,9 @@ a tree b via=c' 4 "reserved for the relay"
 
 expect_fatal badopt '[options]
 frobnicate 9' 2 "unknown option"
+
+expect_fatal badtransport '[options]
+transport pigeon' 2 "transport must be"
 
 expect_fatal badbucket '[retention]
 source fortnightly=3' 2 "bad retention bucket"

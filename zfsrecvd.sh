@@ -36,14 +36,28 @@ proto_err() {
 #
 # ---- 1. authenticate CN -----------------------------------------------------
 #
-# socat has already verified the client cert against our CA (verify=1);
-# what's left is checking that the certificate's CN is on the whitelist.
-# The CN also names the client's namespace: everything it sends lands
-# under recv_root/<CN>/.
-cn="${SOCAT_OPENSSL_X509_COMMONNAME-}"
-if [[ -z "$cn" ]]; then
-    log "ERROR: TLS CN missing; socat not started with OPENSSL-LISTEN verify=1?"
-    exit 1
+# The transport already verified the client cert against our CA; what's
+# left is learning the CN it carried and checking the whitelist. The CN
+# also names the client's namespace: everything it sends lands under
+# recv_root/<CN>/.
+#   socat transport:   OPENSSL-LISTEN verify=1 exports the CN in the env.
+#   haproxy transport: haproxy terminated TLS and prepended a PROXY
+#     protocol v2 header with the CN it extracted from the verified cert;
+#     pp2_read_cn consumes exactly that header (fail-closed ladder, see
+#     pp2.sh) and leaves the session bytes untouched on stdin.
+if [[ "$transport" == "haproxy" ]]; then
+    source /etc/zfsrecvd/pp2.sh
+    if ! pp2_read_cn; then
+        log "ERROR: bad/missing PROXY protocol header on the plaintext port (direct dial? haproxy misconfig?); dropping"
+        exit 1
+    fi
+    cn="$PP2_CN"
+else
+    cn="${SOCAT_OPENSSL_X509_COMMONNAME-}"
+    if [[ -z "$cn" ]]; then
+        log "ERROR: TLS CN missing; socat not started with OPENSSL-LISTEN verify=1?"
+        exit 1
+    fi
 fi
 if ! [[ " ${allowed_hosts[*]} " == *" $cn "* ]]; then
     log "ERROR: CN '$cn' not authorized"

@@ -243,6 +243,20 @@ estimate() {
 #
 IN="" OUT=""                 # fds of the read/write ends of the TLS coproc
 
+# H transport (PROTOCOL.md §20): [tunnel] rows in the run config map a
+# destination dial name to the loopback port of the local haproxy bridge
+# for it; matching destinations are dialed plaintext via /dev/tcp (TLS,
+# peer verification, and connect timeouts all live in haproxy).
+declare -A tunnel_port=()
+if [[ "$transport" == "haproxy" ]]; then
+    for _t in "${tunnels[@]}"; do
+        read -r _td _tp _ <<<"$_t"
+        if [[ -n "${_tp:-}" ]]; then
+            tunnel_port[$_td]="$_tp"
+        fi
+    done
+fi
+
 # Tear down the coproc and its fds; safe to call twice (and called once
 # more via the EXIT trap). No stray redirections on these execs: an exec
 # redirection is permanent, so a careless "2>/dev/null" here would silence
@@ -267,21 +281,36 @@ trap close_session EXIT
 # server's greeting. Nonzero means "no usable session" -- the caller
 # decides whether to retry.
 connect_session() {
-    local ssl_opts="connect-timeout=10"
-    ssl_opts+=",so-keepalive"
-    ssl_opts+=",nodelay"
-    ssl_opts+=",cert=${cert_dir}/client.pem"
-    ssl_opts+=",key=${cert_dir}/client.key"
-    ssl_opts+=",cafile=${cert_dir}/ca.pem"
-    ssl_opts+=",verify=1"
-    coproc NET {
-        exec socat -b 262144 \
-            STDIO \
-            "OPENSSL:${remote}:${tcp_port},${ssl_opts}" \
-            2> >(grep -v "OpenSSL: Warning: this implementation does not check CRLs" >&2)
-    }
-    exec {OUT}>&"${NET[1]}"
-    exec {IN}<&"${NET[0]}"
+    if [[ -n "${tunnel_port[$remote]:-}" ]]; then
+        # plaintext to the local haproxy bridge: one bidirectional fd,
+        # no relay process at all -- pv writes straight into the socket.
+        # Loopback connects succeed or refuse instantly, so there is no
+        # hang risk without a connect-timeout here; reaching the actual
+        # receiver is haproxy's job (timeout connect 5s in its config).
+        local fd
+        NET_PID=""
+        if ! exec {fd}<>"/dev/tcp/127.0.0.1/${tunnel_port[$remote]}"; then
+            return 1
+        fi
+        OUT=$fd
+        IN=$fd
+    else
+        local ssl_opts="connect-timeout=10"
+        ssl_opts+=",so-keepalive"
+        ssl_opts+=",nodelay"
+        ssl_opts+=",cert=${cert_dir}/client.pem"
+        ssl_opts+=",key=${cert_dir}/client.key"
+        ssl_opts+=",cafile=${cert_dir}/ca.pem"
+        ssl_opts+=",verify=1"
+        coproc NET {
+            exec socat -b 262144 \
+                STDIO \
+                "OPENSSL:${remote}:${tcp_port},${ssl_opts}" \
+                2> >(grep -v "OpenSSL: Warning: this implementation does not check CRLs" >&2)
+        }
+        exec {OUT}>&"${NET[1]}"
+        exec {IN}<&"${NET[0]}"
+    fi
     printf 'zfsrecvd2.0\n' >&"$OUT" 2>/dev/null || { close_session; return 1; }
     local g
     IFS= read -r -t 15 -u "$IN" g || { close_session; return 1; }
@@ -290,7 +319,7 @@ connect_session() {
         close_session
         return 1
     fi
-    echo "connected to [$remote] (zfsrecvd2.0)" >&2
+    echo "connected to [$remote] (zfsrecvd2.0${tunnel_port[$remote]:+, haproxy tunnel})" >&2
     return 0
 }
 

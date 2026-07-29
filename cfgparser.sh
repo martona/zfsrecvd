@@ -11,11 +11,14 @@
 #   * orchjobs       (bash array)
 #   * orchworkers    (string, numeric)
 #   * orchec2up      (bash array)
+#   * transport      (string: socat | haproxy)
+#   * tunnels        (bash array: "dial localport" rows, haproxy senders)
 
 CFG="${ZFSRECVD_CONF:-/etc/zfsrecvd/zfsrecvd.conf}"
 
 recv_root="" tcp_port="" tcp_addr="" keep_count="" cert_dir="" allowed_hosts=()
 sends=() prune_prefixes=() orchtargets=() orchjobs=() orchec2up=() orchworkers=""
+transport="" tunnels=()
 
 current=""
 while IFS= read -r line || [[ -n "$line" ]]; do
@@ -40,6 +43,8 @@ while IFS= read -r line || [[ -n "$line" ]]; do
         orchestrator-targets)  orchtargets+=( "$line" ) ;;
         orchestrator-jobs)     orchjobs+=( "$line" ) ;;
         orchestrator-workers)  orchworkers="$line" ;;
+        transport)             transport="$line" ;;
+        tunnel)                tunnels+=( "$line" ) ;;
         orchestrator-ec2up)    orchec2up+=( "$line" ) ;;
     esac
 done < "$CFG"
@@ -66,6 +71,7 @@ if ! [[ "$keep_count" =~ ^[0-9]+$ ]]; then keep_count=6; fi
 # cert-dir lets a generated run config point at per-run certs (fleetrun.sh)
 # without touching the static /etc/zfsrecvd ones.
 if [[ -z "$cert_dir" ]]; then cert_dir="/etc/zfsrecvd"; fi
+if [[ -z "$transport" ]]; then transport="socat"; fi
 if [[ ${#prune_prefixes[@]} -eq 0 ]]; then prune_prefixes=( "zfsrecvd-" ); fi
 
 # force pv to display output. inner scripts will run through run_indented.sh so they

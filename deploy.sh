@@ -42,6 +42,7 @@ scripts=(
     fleetrun.sh
     listen.sh
     orchestrate.sh
+    pp2.sh
     run_indented.sh
     send.sh
     sendtree.sh
