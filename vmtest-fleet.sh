@@ -94,9 +94,14 @@ check "T2 rc=78" test "$rc" -eq 78
 grep -q "no recv=" <<<"$out" && ok "T2 message" || { bad "T2 message"; echo "$out"; }
 
 echo "=== T3: full fleet run ==="
+# scripts must be shipped by the run itself (participants need no prior
+# deploy). Single-box rig: ship source == target, so mtime/content can't
+# prove anything -- but --unlink-first guarantees a fresh inode.
+ino_before=$(stat -c %i /etc/zfsrecvd/sendall.sh)
 /etc/zfsrecvd/fleetrun.sh -c ~/fleet-test.conf >/tmp/fleet1.log 2>&1
 rc=$?
 check "T3 rc=0" test "$rc" -eq 0
+check "T3 scripts shipped with run" bash -c "[ \"\$(stat -c %i /etc/zfsrecvd/sendall.sh)\" != \"$ino_before\" ]"
 check "T3 data arrived"        sudo zfs list -H "$DEST"
 check "T3 deep child arrived"  bash -c "sudo zfs list -H -t snapshot -d 1 -o name $DEST/a/deep | grep -q zfsrecvd-"
 check "T3 zvol arrived"        bash -c "sudo zfs list -H -t snapshot -d 1 -o name $DEST/vol | grep -q zfsrecvd-"

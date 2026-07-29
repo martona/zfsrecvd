@@ -33,6 +33,27 @@ FLEET_CONF="/etc/zfsrecvd/fleet.conf"
 # physical host (sender + receiver roles, or test rigs) without their
 # bundles clobbering each other.
 RUN_REMOTE_BASE="/etc/zfsrecvd/run"
+
+# The scripts every participant gets refreshed with on every run, from
+# this orchestrator's /etc/zfsrecvd (keep in sync with deploy.sh's list).
+# Shipping them per run makes participants stateless: a brand-new sender
+# needs only ssh, sudo, and the packages (zfs, socat, pv, gawk) -- no
+# prior deploy.sh visit. --unlink-first so a script that is executing
+# right now is replaced via a fresh inode, never truncated.
+FLEET_SCRIPTS=(
+    cfgparser.sh
+    deploy.sh
+    ec2helpers.sh
+    fleetparser.sh
+    fleetrun.sh
+    listen.sh
+    orchestrate.sh
+    run_indented.sh
+    send.sh
+    sendall.sh
+    sendtree.sh
+    zfsrecvd.sh
+)
 check_only=""
 keep_rundir=""
 orch_args=()
@@ -48,6 +69,13 @@ while (( $# > 0 )); do
 done
 
 fleet_parse "$FLEET_CONF"
+
+for f in "${FLEET_SCRIPTS[@]}"; do
+    if [[ ! -f "/etc/zfsrecvd/$f" ]]; then
+        echo "ERROR: /etc/zfsrecvd/$f missing on the orchestrator; run install.sh first" >&2
+        exit 1
+    fi
+done
 
 #
 # ---------- plan -------------------------------------------------------------
@@ -210,8 +238,9 @@ provision_host() {   # $1 = host identity
     mkdir -p "$bdir"
     echo "provisioning [$id] ($dest)" >&2
 
-    # key + CSR minted on the host; only the CSR travels back
-    fleet_ssh "$dest" "sudo -n mkdir -p $rdir && sudo -n chmod 700 $rdir && sudo -n openssl req -new -newkey rsa:2048 -nodes -keyout $rdir/client.key -subj /CN=$id 2>/dev/null && sudo -n chmod 600 $rdir/client.key" \
+    # dependency preflight + key/CSR minted on the host; only the CSR
+    # travels back
+    fleet_ssh "$dest" "for b in zfs socat pv openssl; do command -v \$b >/dev/null || { echo \"missing dependency on this host: \$b\" >&2; exit 9; }; done; sudo -n mkdir -p $rdir && sudo -n chmod 700 $rdir && sudo -n openssl req -new -newkey rsa:2048 -nodes -keyout $rdir/client.key -subj /CN=$id 2>/dev/null && sudo -n chmod 600 $rdir/client.key" \
         </dev/null > "$rundir/$id.csr"
     if ! grep -q "BEGIN CERTIFICATE REQUEST" "$rundir/$id.csr"; then
         echo "ERROR: no CSR from [$id]" >&2
@@ -231,6 +260,11 @@ provision_host() {   # $1 = host identity
 
     tar czf - -C "$bdir" . | fleet_ssh "$dest" \
         "sudo -n tar xzf - -C $rdir && sudo -n cp $rdir/client.key $rdir/server.key && sudo -n chmod 600 $rdir/server.key"
+
+    # refresh the scripts themselves: participants are stateless, no prior
+    # deploy.sh visit required, and version skew cannot exist within a run
+    tar czf - -C /etc/zfsrecvd "${FLEET_SCRIPTS[@]}" | fleet_ssh "$dest" \
+        "sudo -n mkdir -p /etc/zfsrecvd && sudo -n tar xzf - -C /etc/zfsrecvd --unlink-first"
     provisioned+=( "$id" )
 }
 
