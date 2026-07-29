@@ -125,6 +125,7 @@ check "T4 local rundirs gone"  bash -c "! ls -d /tmp/zfsrecvd-fleet.* 2>/dev/nul
 static_sum2=$(sudo sha256sum /etc/zfsrecvd/client.pem /etc/zfsrecvd/server.pem /etc/zfsrecvd/ca.pem | sha256sum)
 check "T4 static certs untouched" test "$static_sum" = "$static_sum2"
 check "T4 legacy listener still up" bash -c 'ss -tln | grep -q ":5299 "'
+check "T4 teardown quiet (no spurious warnings)" bash -c "! grep -q 'WARNING.*still active' /tmp/fleet1.log && ! grep -q 'could not stop' /tmp/fleet1.log"
 
 echo "=== T5: immediate rerun (same minute): idempotent, all up to date ==="
 /etc/zfsrecvd/fleetrun.sh -c ~/fleet-test.conf >/tmp/fleet2.log 2>&1
@@ -211,6 +212,7 @@ check "T11 ha unit (sender) gone"   bash -c "! systemctl is-active --quiet zfsre
 check "T11 ha unit vmrecv gone"     bash -c "! systemctl is-active --quiet zfsrecvd-ha-vmrecv"
 check "T11 ha unit vmrecv2 gone"    bash -c "! systemctl is-active --quiet zfsrecvd-ha-vmrecv2"
 check "T11 no run ports left"       bash -c "! ss -tln | grep -E ':(15299|15300|15301|15363|15364) ' | grep -q ."
+check "T11 teardown quiet (no spurious warnings)" bash -c "! grep -q 'WARNING.*still active' /tmp/fleet7.log && ! grep -q 'could not stop' /tmp/fleet7.log"
 
 echo
 echo "=== RESULT: $PASS passed, $FAIL failed ==="

@@ -157,16 +157,21 @@ fleet_ssh() {   # <user@addr> <command...>
 }
 
 fleet_teardown() {
+    # stop + reset-failed are best-effort: a CLEANLY stopped transient
+    # unit is removed instantly, making reset-failed whine "not loaded"
+    # -- rc noise, not a failure (first real H run warned on every host
+    # while every haproxy was in fact down). The verdict is the final
+    # is-active: warn only when a unit actually survived teardown.
     local h dest
     for h in "${ha_started[@]}"; do
         dest=$(fleet_ssh_dest "$h")
-        fleet_ssh "$dest" "sudo -n systemctl stop zfsrecvd-ha-$h 2>/dev/null; sudo -n systemctl reset-failed zfsrecvd-ha-$h 2>/dev/null" \
-            </dev/null || echo "WARNING: could not stop haproxy on [$h]" >&2
+        fleet_ssh "$dest" "sudo -n systemctl stop zfsrecvd-ha-$h 2>/dev/null; sudo -n systemctl reset-failed zfsrecvd-ha-$h 2>/dev/null; ! systemctl is-active --quiet zfsrecvd-ha-$h" \
+            </dev/null || echo "WARNING: haproxy unit still active on [$h]" >&2
     done
     for h in "${listeners[@]}"; do
         dest=$(fleet_ssh_dest "$h")
-        fleet_ssh "$dest" "sudo -n systemctl stop zfsrecvd-run-$h 2>/dev/null; sudo -n systemctl reset-failed zfsrecvd-run-$h 2>/dev/null" \
-            </dev/null || echo "WARNING: could not stop run listener on [$h]" >&2
+        fleet_ssh "$dest" "sudo -n systemctl stop zfsrecvd-run-$h 2>/dev/null; sudo -n systemctl reset-failed zfsrecvd-run-$h 2>/dev/null; ! systemctl is-active --quiet zfsrecvd-run-$h" \
+            </dev/null || echo "WARNING: run listener still active on [$h]" >&2
     done
     # prov_failed hosts too: a mid-provision failure can leave a partial
     # run dir behind, and the cleanup attempt is cheap if they are still
