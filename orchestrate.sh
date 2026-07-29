@@ -29,19 +29,34 @@ fails=()
 pids=()
 logdir=""
 
-# split "[orchestrator-targets]" into parallel host/user arrays
+# split "[orchestrator-targets]" into parallel arrays. Column 3 is an
+# optional per-host remote config path (fleetrun.sh points each source at
+# its generated run config); ZFSRECVD_REMOTE_CONF is the global fallback.
 hosts=()
 users=()
+rconfs=()
 for entry in "${orchtargets[@]}"; do
-    read -r host user _ <<<"$entry"          # ignore extra columns
+    read -r host user rconf _ <<<"$entry"    # ignore extra columns
     [[ -z "$host" || -z "$user" ]] && continue
     hosts+=( "$host" )
     users+=( "$user" )
+    rconfs+=( "${rconf:-${ZFSRECVD_REMOTE_CONF:-}}" )
 done
 if [[ ${#hosts[@]} -eq 0 ]]; then
     echo "No hosts in [orchestrator-targets]; nothing to do." >&2
     exit 0
 fi
+
+# What to run on host i: with a per-host run config (fleetrun) sendall gets
+# it via the ZFSRECVD_CONF override; standalone runs use the host's own
+# /etc/zfsrecvd/zfsrecvd.conf as always.
+remote_cmd_for() {
+    if [[ -n "${rconfs[$1]}" ]]; then
+        printf 'sudo env ZFSRECVD_CONF=%s /etc/zfsrecvd/sendall.sh' "${rconfs[$1]}"
+    else
+        printf 'sudo /etc/zfsrecvd/sendall.sh'
+    fi
+}
 
 record_result() {
     local host="$1" rc="$2"
@@ -92,7 +107,7 @@ run_serial() {
         echo "Connecting to [${users[i]}@${hosts[i]}] to execute sendall.sh" >&2
         set +e
         ssh "${ssh_tty_flag[@]}" -o ConnectTimeout=10 -o BatchMode=yes \
-            "${users[i]}@${hosts[i]}" sudo /etc/zfsrecvd/sendall.sh
+            "${users[i]}@${hosts[i]}" "$(remote_cmd_for "$i")"
         rc=$?
         set -e
         record_result "${hosts[i]}" "$rc"
@@ -109,7 +124,7 @@ run_parallel_plain() {
     for ((i = 0; i < ${#hosts[@]}; i++)); do
         echo "Connecting to [${users[i]}@${hosts[i]}] to execute sendall.sh" >&2
         ssh -o ConnectTimeout=10 -o BatchMode=yes \
-            "${users[i]}@${hosts[i]}" sudo /etc/zfsrecvd/sendall.sh </dev/null &
+            "${users[i]}@${hosts[i]}" "$(remote_cmd_for "$i")" </dev/null &
         pids[i]=$!
     done
     for ((i = 0; i < ${#hosts[@]}; i++)); do
@@ -159,7 +174,7 @@ run_parallel_live() {
     echo "Orchestrating ${n} hosts in parallel (logs: $logdir)" >&2
     for ((i = 0; i < n; i++)); do
         ssh -tt -o ConnectTimeout=10 -o BatchMode=yes "${users[i]}@${hosts[i]}" \
-            "stty cols $remote_cols 2>/dev/null || true; exec sudo /etc/zfsrecvd/sendall.sh" \
+            "stty cols $remote_cols 2>/dev/null || true; exec $(remote_cmd_for "$i")" \
             </dev/null >"$logdir/${hosts[i]}.log" 2>&1 &
         pids[i]=$!
         rcs[i]=0

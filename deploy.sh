@@ -38,6 +38,8 @@ scripts=(
     cfgparser.sh
     deploy.sh
     ec2helpers.sh
+    fleetparser.sh
+    fleetrun.sh
     listen.sh
     orchestrate.sh
     run_indented.sh

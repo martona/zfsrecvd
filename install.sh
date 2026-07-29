@@ -7,6 +7,8 @@ mkdir -p /etc/zfsrecvd
 cp "$SCRIPT_DIR/cfgparser.sh"     /etc/zfsrecvd/
 cp "$SCRIPT_DIR/deploy.sh"        /etc/zfsrecvd/
 cp "$SCRIPT_DIR/ec2helpers.sh"    /etc/zfsrecvd/
+cp "$SCRIPT_DIR/fleetparser.sh"   /etc/zfsrecvd/
+cp "$SCRIPT_DIR/fleetrun.sh"      /etc/zfsrecvd/
 cp "$SCRIPT_DIR/orchestrate.sh"   /etc/zfsrecvd/
 cp "$SCRIPT_DIR/sendall.sh"       /etc/zfsrecvd/
 cp "$SCRIPT_DIR/sendtree.sh"      /etc/zfsrecvd/

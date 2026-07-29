@@ -12,9 +12,9 @@ echo "Starting ZFS receive listener on $tcp_addr:$tcp_port" >&2
 ssl_opts="reuseaddr,fork,max-children=16"
 ssl_opts+=",nodelay"
 ssl_opts+=",so-keepalive"
-ssl_opts+=",cert=/etc/zfsrecvd/server.pem"
-ssl_opts+=",key=/etc/zfsrecvd/server.key"
-ssl_opts+=",cafile=/etc/zfsrecvd/ca.pem"
+ssl_opts+=",cert=${cert_dir}/server.pem"
+ssl_opts+=",key=${cert_dir}/server.key"
+ssl_opts+=",cafile=${cert_dir}/ca.pem"
 ssl_opts+=",verify=1"
 
 exec /usr/bin/socat -b 262144 \

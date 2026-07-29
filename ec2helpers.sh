@@ -11,6 +11,11 @@
 # two exclude each other. The file is chmod 666 so root-run and user-run
 # invocations contend on the same lock instead of locking each other out.
 orch_lock() {
+    # fleetrun.sh holds the estate lock itself and runs orchestrate.sh as a
+    # child; the child must not contend with its parent.
+    if [[ -n "${ZFSRECVD_SKIP_LOCK:-}" ]]; then
+        return 0
+    fi
     local lock_file="${ZFSRECVD_LOCK_FILE:-/run/lock/zfsrecvd-orchestrate.lock}"
     # Probe with a normal redirection first: a failed exec redirection would
     # abort the script with a bare "Permission denied" instead of this hint.

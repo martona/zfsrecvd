@@ -194,9 +194,9 @@ connect_session() {
     local ssl_opts="connect-timeout=10"
     ssl_opts+=",so-keepalive"
     ssl_opts+=",nodelay"
-    ssl_opts+=",cert=/etc/zfsrecvd/client.pem"
-    ssl_opts+=",key=/etc/zfsrecvd/client.key"
-    ssl_opts+=",cafile=/etc/zfsrecvd/ca.pem"
+    ssl_opts+=",cert=${cert_dir}/client.pem"
+    ssl_opts+=",key=${cert_dir}/client.key"
+    ssl_opts+=",cafile=${cert_dir}/ca.pem"
     ssl_opts+=",verify=1"
     coproc NET {
         exec socat -b 262144 \

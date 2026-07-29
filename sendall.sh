@@ -48,6 +48,11 @@ for entry in "${sends[@]}"; do
         echo "Taking snapshot: [$dataset@${snap}]" >&2
         if zfs snapshot -r "${dataset}@${snap}"; then
             snapped[$dataset]="ok"
+        elif zfs list -H "${dataset}@${snap}" >/dev/null 2>&1; then
+            # a run within the same minute already made it; snapshot
+            # creation is idempotent by design (see PROTOCOL.md §19)
+            echo "NOTE: [$dataset@${snap}] already exists; reusing" >&2
+            snapped[$dataset]="ok"
         else
             snapped[$dataset]="failed"
         fi

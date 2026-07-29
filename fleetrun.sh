@@ -1,0 +1,277 @@
+#!/usr/bin/env bash
+# The Final Shape driver: one run of the whole fleet from one config.
+#
+#   fleetrun.sh [-c fleet.conf] [--check] [--keep] [-- orchestrate args]
+#
+# Reads fleet.conf (see fleetparser.sh / PROTOCOL.md §18), then:
+#   1. wakes any EC2 hosts participating in this run,
+#   2. mints a per-run CA and per-host certs (keys are generated ON the
+#      hosts and never transit; validity is a constant 365 days -- the
+#      revocation story is CA abandonment at teardown, not expiry),
+#   3. generates per-host run configs (the CLASSIC format, consumed via
+#      the ZFSRECVD_CONF override -- sendall/sendtree/listen are unchanged),
+#   4. ships bundles to /etc/zfsrecvd/run/ on every participant,
+#   5. starts an ephemeral listener (systemd-run unit "zfsrecvd-run") on
+#      every receiver, bound to the run CA,
+#   6. executes the run through the existing orchestrate.sh (board, EC2
+#      debt handling, summaries all reused),
+#   7. tears everything down: listeners stopped, /etc/zfsrecvd/run removed,
+#      local run dir (including the CA key) deleted unless --keep.
+#
+# Static certs and each host's own /etc/zfsrecvd/zfsrecvd.conf are never
+# touched; manual send.sh runs keep working throughout.
+#
+# Exit: orchestrate's exit code (0/1/2), or 78 config, 75 busy, 1 provisioning.
+
+set -euo pipefail
+set -f
+source /etc/zfsrecvd/ec2helpers.sh
+source /etc/zfsrecvd/fleetparser.sh
+
+FLEET_CONF="/etc/zfsrecvd/fleet.conf"
+# Per-IDENTITY run dirs under this base: two identities can share one
+# physical host (sender + receiver roles, or test rigs) without their
+# bundles clobbering each other.
+RUN_REMOTE_BASE="/etc/zfsrecvd/run"
+check_only=""
+keep_rundir=""
+orch_args=()
+while (( $# > 0 )); do
+    case "$1" in
+        -c|--config) FLEET_CONF="$2"; shift 2 ;;
+        --check)     check_only=1; shift ;;
+        --keep)      keep_rundir=1; shift ;;
+        --)          shift; orch_args=( "$@" ); break ;;
+        *)           echo "Usage: $0 [-c fleet.conf] [--check] [--keep] [-- orchestrate args]" >&2
+                     exit 64 ;;
+    esac
+done
+
+fleet_parse "$FLEET_CONF"
+
+#
+# ---------- plan -------------------------------------------------------------
+#
+wake_ids=()
+for h in "${fleet_participants[@]}"; do
+    if [[ -n "${fleet_host_ec2[$h]:-}" ]]; then
+        wake_ids+=( "${fleet_host_ec2[$h]}" )
+    fi
+done
+
+echo "fleet plan: ${#fleet_job_src[@]} jobs, sources: ${fleet_sources[*]}, receivers: ${fleet_receivers[*]}" >&2
+if [[ ${#wake_ids[@]} -gt 0 ]]; then
+    echo "fleet plan: EC2 wake set: ${wake_ids[*]}" >&2
+fi
+if [[ -n "$check_only" ]]; then
+    local_i=0
+    while (( local_i < ${#fleet_job_src[@]} )); do
+        printf '  job: %s %s -> %s (dial %s)\n' \
+            "${fleet_job_src[local_i]}" "${fleet_job_tree[local_i]}" \
+            "${fleet_job_dest[local_i]}" "$(fleet_data "${fleet_job_dest[local_i]}")" >&2
+        local_i=$(( local_i + 1 ))
+    done
+    echo "fleet plan: OK (check only, nothing provisioned)" >&2
+    exit 0
+fi
+
+# One orchestrate/deploy/fleetrun at a time across the estate; the child
+# orchestrate skips the lock via ZFSRECVD_SKIP_LOCK.
+orch_lock
+export ZFSRECVD_SKIP_LOCK=1
+
+rundir=$(mktemp -d /tmp/zfsrecvd-fleet.XXXXXX)
+provisioned=()
+listeners=()
+
+is_receiver() {
+    local r
+    for r in "${fleet_receivers[@]}"; do
+        [[ "$r" == "$1" ]] && return 0
+    done
+    return 1
+}
+
+is_source() {
+    local s
+    for s in "${fleet_sources[@]}"; do
+        [[ "$s" == "$1" ]] && return 0
+    done
+    return 1
+}
+
+fleet_ssh() {   # <user@addr> <command...>
+    local dest="$1"
+    shift
+    ssh -o ConnectTimeout=10 -o BatchMode=yes "$dest" "$@"
+}
+
+fleet_teardown() {
+    local h dest
+    for h in "${listeners[@]}"; do
+        dest=$(fleet_ssh_dest "$h")
+        fleet_ssh "$dest" "sudo -n systemctl stop zfsrecvd-run-$h 2>/dev/null; sudo -n systemctl reset-failed zfsrecvd-run-$h 2>/dev/null" \
+            </dev/null || echo "WARNING: could not stop run listener on [$h]" >&2
+    done
+    for h in "${provisioned[@]}"; do
+        dest=$(fleet_ssh_dest "$h")
+        fleet_ssh "$dest" "sudo -n rm -rf $RUN_REMOTE_BASE/$h; sudo -n rmdir $RUN_REMOTE_BASE 2>/dev/null || true" \
+            </dev/null || echo "WARNING: could not remove $RUN_REMOTE_BASE/$h on [$h]" >&2
+    done
+    if [[ -n "$keep_rundir" ]]; then
+        echo "run artifacts kept in $rundir (--keep)" >&2
+    else
+        rm -rf -- "$rundir"
+    fi
+}
+
+#
+# ---------- 1. wake EC2 (before provisioning needs to ssh into them) ----------
+#
+orchec2up=( "${wake_ids[@]}" )
+ec2_maybe_start
+# ec2_maybe_start installed its own EXIT trap; combine with teardown so a
+# failure at any later point still stops instances AND cleans up hosts.
+trap 'fleet_teardown; stop_ec2_instances' EXIT
+
+#
+# ---------- 2. mint the run CA -----------------------------------------------
+#
+run_id="run-$(date -u +%Y%m%d-%H%M%S)"
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+    -keyout "$rundir/ca.key" -out "$rundir/ca.pem" \
+    -subj "/CN=zfsrecvd-$run_id-ca" 2>/dev/null
+echo "minted run CA ($run_id, validity 365d)" >&2
+
+#
+# ---------- 3. generate + provision every participant ------------------------
+#
+gen_run_conf() {   # $1 = host identity -> writes $rundir/bundle-$1/run.conf
+    local id="$1" out="$rundir/bundle-$1/run.conf"
+    # Interim until D wires the full grid: keep-count is the [retention]
+    # hourly bucket -- source scope for senders, destination scope for
+    # receivers, the max of the two for dual-role hosts (one keep-count
+    # governs both trees on such a host, and keeping more is the safe
+    # direction). Falls back to 6 when the bucket is absent.
+    local kc="" src_h dst_h
+    src_h=$(fleet_ret_bucket "$fleet_ret_source" hourly)
+    dst_h=$(fleet_ret_bucket "$fleet_ret_destination" hourly)
+    if is_source "$id" && [[ -n "$src_h" ]]; then
+        kc="$src_h"
+    fi
+    if is_receiver "$id" && [[ -n "$dst_h" ]]; then
+        if [[ -z "$kc" || "$dst_h" -gt "$kc" ]]; then
+            kc="$dst_h"
+        fi
+    fi
+    [[ -z "$kc" ]] && kc=6
+    {
+        printf '# generated by fleetrun %s for %s -- do not edit\n' "$run_id" "$id"
+        printf '[cert-dir]\n%s/%s\n' "$RUN_REMOTE_BASE" "$id"
+        printf '[tcp-port]\n%s\n' "$fleet_opt_port"
+        printf '[keep-count]\n%s\n' "$kc"
+        printf '[prune-prefixes]\nzfsrecvd-\n'
+        local i had_sends=""
+        for (( i = 0; i < ${#fleet_job_src[@]}; i++ )); do
+            if [[ "${fleet_job_src[i]}" == "$id" ]]; then
+                if [[ -z "$had_sends" ]]; then
+                    printf '[sends]\n'
+                    had_sends=1
+                fi
+                printf '%s %s\n' "${fleet_job_tree[i]}" "$(fleet_data "${fleet_job_dest[i]}")"
+            fi
+        done
+        if is_receiver "$id"; then
+            printf '[recv-root]\n%s\n' "${fleet_host_recv[$id]}"
+            printf '[tcp-addr]\n%s\n' "${fleet_host_bind[$id]:-0.0.0.0}"
+            printf '[allowed_hosts]\n'
+            local s
+            declare -A allowed=()
+            for (( i = 0; i < ${#fleet_job_src[@]}; i++ )); do
+                if [[ "${fleet_job_dest[i]}" == "$id" ]]; then
+                    s="${fleet_job_src[i]}"
+                    if [[ -z "${allowed[$s]:-}" ]]; then
+                        allowed[$s]=1
+                        printf '%s\n' "$s"
+                    fi
+                fi
+            done
+        fi
+    } > "$out"
+}
+
+provision_host() {   # $1 = host identity
+    local id="$1"
+    local dest data bdir rdir
+    dest=$(fleet_ssh_dest "$id")
+    data=$(fleet_data "$id")
+    bdir="$rundir/bundle-$id"
+    rdir="$RUN_REMOTE_BASE/$id"
+    mkdir -p "$bdir"
+    echo "provisioning [$id] ($dest)" >&2
+
+    # key + CSR minted on the host; only the CSR travels back
+    fleet_ssh "$dest" "sudo -n mkdir -p $rdir && sudo -n chmod 700 $rdir && sudo -n openssl req -new -newkey rsa:2048 -nodes -keyout $rdir/client.key -subj /CN=$id 2>/dev/null && sudo -n chmod 600 $rdir/client.key" \
+        </dev/null > "$rundir/$id.csr"
+    if ! grep -q "BEGIN CERTIFICATE REQUEST" "$rundir/$id.csr"; then
+        echo "ERROR: no CSR from [$id]" >&2
+        exit 1
+    fi
+
+    # sign with the run CA; SANs carry identity and dial name (H needs SANs)
+    printf 'subjectAltName=DNS:%s,DNS:%s\n' "$id" "$data" > "$rundir/$id.ext"
+    openssl x509 -req -in "$rundir/$id.csr" -CA "$rundir/ca.pem" -CAkey "$rundir/ca.key" \
+        -CAcreateserial -days 365 -extfile "$rundir/$id.ext" -out "$bdir/client.pem" 2>/dev/null
+    grep -q "BEGIN CERTIFICATE" "$bdir/client.pem" || { echo "ERROR: signing failed for [$id]" >&2; exit 1; }
+
+    # one key+cert serves both roles: no EKU restriction, both names in SAN
+    cp "$bdir/client.pem" "$bdir/server.pem"
+    cp "$rundir/ca.pem" "$bdir/ca.pem"
+    gen_run_conf "$id"
+
+    tar czf - -C "$bdir" . | fleet_ssh "$dest" \
+        "sudo -n tar xzf - -C $rdir && sudo -n cp $rdir/client.key $rdir/server.key && sudo -n chmod 600 $rdir/server.key"
+    provisioned+=( "$id" )
+}
+
+start_listener() {   # $1 = receiver identity
+    local id="$1" dest unit
+    dest=$(fleet_ssh_dest "$id")
+    unit="zfsrecvd-run-$id"
+    echo "starting run listener on [$id] (port $fleet_opt_port)" >&2
+    fleet_ssh "$dest" "sudo -n systemctl stop $unit 2>/dev/null; sudo -n systemctl reset-failed $unit 2>/dev/null; sudo -n systemd-run --unit=$unit --setenv=ZFSRECVD_CONF=$RUN_REMOTE_BASE/$id/run.conf /etc/zfsrecvd/listen.sh >/dev/null 2>&1; for i in \$(seq 1 40); do ss -tln | grep -q ':$fleet_opt_port ' && exit 0; sleep 0.25; done; echo 'run listener failed to bind:' >&2; sudo -n journalctl -u $unit -n 10 --no-pager >&2; exit 1" \
+        </dev/null
+    listeners+=( "$id" )
+}
+
+for h in "${fleet_participants[@]}"; do
+    provision_host "$h"
+done
+for h in "${fleet_receivers[@]}"; do
+    start_listener "$h"
+done
+
+#
+# ---------- 4. generated orchestrator config + execute -----------------------
+#
+{
+    printf '# generated by fleetrun %s -- do not edit\n' "$run_id"
+    printf '[orchestrator-targets]\n'
+    # column 3 = that source's generated run config (per identity)
+    for h in "${fleet_sources[@]}"; do
+        dest=$(fleet_ssh_dest "$h")
+        printf '%s %s %s/%s/run.conf\n' "${dest#*@}" "${dest%%@*}" "$RUN_REMOTE_BASE" "$h"
+    done
+    # EC2 handled by fleetrun itself (instances must be up before
+    # provisioning); the child orchestrate gets an empty wake set.
+} > "$rundir/orchestrator.conf"
+
+echo "executing run $run_id" >&2
+set +e
+ZFSRECVD_CONF="$rundir/orchestrator.conf" \
+    /etc/zfsrecvd/orchestrate.sh "${orch_args[@]}"
+orch_rc=$?
+set -e
+
+echo "run $run_id finished (rc=$orch_rc); tearing down" >&2
+exit "$orch_rc"
