@@ -228,9 +228,12 @@ send_flags_for() {
 
 # Dry-run size of a send (bytes), for pv -s and the SEND line; "-" when the
 # estimate can't be had. 2>&1 because some send variants print the size
-# line to stderr.
+# line to stderr. The announce goes out first: on a big rusty delta the
+# dry run itself can grind for a long time, and without a line here the
+# live board sits on the session header looking hung.
 estimate() {
     local sz
+    echo "estimating ${*: -1}" >&2
     sz=$(zfs send -nP "$@" 2>&1 | awk '/^size/{print $2; exit}') || sz=""
     echo "${sz:--}"
 }
@@ -402,6 +405,7 @@ plan_one() {
     # to date: a lingering token blocks all future receives on the dataset.
     if [[ -n "${token[$ds]:-}" ]]; then
         local tk="${token[$ds]}" tinfo toname rsn
+        echo "checking resume token for [$ds]" >&2
         if tinfo=$(zfs send -nP -t "$tk" 2>&1); then
             # Token is satisfiable here: resume the interrupted stream, then
             # fall through and re-plan -- the token may predate newer snaps.
@@ -557,7 +561,7 @@ while true; do
         sleep 2
         continue
     fi
-    echo "tree [$root@$target] -> [$remote]: ${#datasets[@]} datasets local, ${#have[@]} known to receiver" >&2
+    echo "tree [$root@$target]${dest_tag}: ${#datasets[@]} datasets local, ${#have[@]} known to receiver" >&2
 
     progress=0               # datasets settled this session (resets strikes)
     session_dead=""

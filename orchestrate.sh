@@ -112,8 +112,13 @@ job_label() {   # $1 = job index -> "[src] tree -> [dst]"
 # an executable, hence the bash -c wrapper; the prefix names both ends so
 # nothing downstream tags the stream again. $2 is extra env for the
 # sudo env invocation (" ZFSRECVD_COLS=N" under the live board).
+# The [ -t 2 ] probe MUST happen here, before run_indented wraps stderr
+# in the gawk pipe: cfgparser's own tty check runs inside that pipe and
+# would never see the pty, so pv would stay silent for the whole run
+# (sendall used to probe at the right moment; found on the first real T
+# run when three massive sends showed no progress at all).
 job_cmd() {
-    printf "sudo -n env ZFSRECVD_CONF=%s%s bash -c 'source /etc/zfsrecvd/run_indented.sh; run_indented \"[%s]>[%s] \" /etc/zfsrecvd/sendtree.sh --no-prune %s@%s %s'" \
+    printf "sudo -n env ZFSRECVD_CONF=%s%s bash -c '[ -t 2 ] && export PV_FORCE_FLAG=-f; source /etc/zfsrecvd/run_indented.sh; run_indented \"[%s]>[%s] \" /etc/zfsrecvd/sendtree.sh --no-prune %s@%s %s'" \
         "${J_RCONF[$1]}" "$2" "${J_SRC[$1]}" "${J_DST[$1]}" \
         "${J_TREE[$1]}" "$snap" "${J_DIAL[$1]}"
 }
@@ -177,6 +182,13 @@ on_job_finish() {   # $1 = job index, $2 = rc
 # what the bottom line of a serial terminal would be showing.
 latest_line() {
     tail -c 4096 "$1" 2>/dev/null | tr '\r' '\n' | grep -v '^[[:space:]]*$' | tail -n 1 || true
+}
+
+# Per-job log path, named for humans (owner-specified order): the tree
+# names the workload, slashes flattened; the job index is a postfix
+# uniquifier only.
+job_log() {   # $1 = job index
+    printf '%s/%s-%s-%s-%s.log' "$logdir" "${J_SRC[$1]}" "${J_DST[$1]}" "${J_TREE[$1]//\//_}" "$1"
 }
 
 orch_cleanup() {
@@ -290,7 +302,7 @@ run_pool() {   # $1 = live | plain
             if [[ "$mode" == "live" ]]; then
                 ssh -tt "${ssh_opts[@]}" "${J_SSH[i]}" \
                     "stty cols $remote_cols 2>/dev/null || true; exec $(job_cmd "$i" " ZFSRECVD_COLS=$remote_cols")" \
-                    </dev/null >"$logdir/job$i.log" 2>&1 &
+                    </dev/null >"$(job_log "$i")" 2>&1 &
             else
                 echo "job start: $(job_label "$i")" >&2
                 ssh "${ssh_opts[@]}" "${J_SSH[i]}" "$(job_cmd "$i" "")" </dev/null &
@@ -321,7 +333,7 @@ run_pool() {   # $1 = live | plain
             for (( w = 0; w < workers; w++ )); do
                 i="${slot_job[w]}"
                 if [[ -n "$i" ]]; then
-                    content=$(latest_line "$logdir/job$i.log")
+                    content=$(latest_line "$(job_log "$i")")
                     [[ -n "$content" ]] || content="starting $(job_label "$i")..."
                     printf '\e[2K%s %s\n' "${c_run}▸${c_off}" "${content:0:cols > 4 ? cols - 4 : 1}" >&2
                 else
@@ -344,10 +356,10 @@ run_pool() {   # $1 = live | plain
         if (( any_bad )); then
             for (( i = 0; i < njobs; i++ )); do
                 if [[ "${J_STATE[i]}" == "done" && "${J_RC[i]}" != "0" ]]; then
-                    echo "---- $(job_label "$i") last lines (full log: $logdir/job$i.log) ----" >&2
+                    echo "---- $(job_label "$i") last lines (full log: $(job_log "$i")) ----" >&2
                     # strip the pty's CRLF first, then split pv's bare-\r
                     # records; tr alone would double-space every line
-                    sed -e 's/\r$//' "$logdir/job$i.log" | tr '\r' '\n' | tail -n 40 >&2
+                    sed -e 's/\r$//' "$(job_log "$i")" | tr '\r' '\n' | tail -n 40 >&2
                 fi
             done
             echo "Per-job logs kept in: $logdir" >&2
@@ -415,9 +427,12 @@ for key in "${pp_keys[@]}"; do
         echo "NOTE: not pruning [${J_TREE[i]}] on [${J_SRC[i]}]: not every destination finished clean" >&2
         continue
     fi
-    echo "prune-post: [${J_TREE[i]}] on [${J_SRC[i]}]" >&2
+    echo "prune-post: [${J_TREE[i]}] on [${J_SRC[i]}] (journalctl -t zfsrecvd-prune there for details)" >&2
+    # systemd-cat: the per-snapshot prune lines land in the SOURCE's
+    # journal instead of on the board -- quiet here, inspectable later
+    # where the pruning actually happened.
     ssh "${ssh_opts[@]}" "${J_SSH[i]}" \
-        "sudo -n env ZFSRECVD_CONF=${J_RCONF[i]} /etc/zfsrecvd/sendtree.sh --prune-only ${J_TREE[i]}" \
+        "sudo -n systemd-cat -t zfsrecvd-prune env ZFSRECVD_CONF=${J_RCONF[i]} /etc/zfsrecvd/sendtree.sh --prune-only ${J_TREE[i]}" \
         </dev/null \
         || echo "WARNING: prune-post failed for [${J_TREE[i]}] on [${J_SRC[i]}]" >&2
 done

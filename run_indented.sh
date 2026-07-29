@@ -2,39 +2,67 @@
 
 # run_indented <prefix> <command> [args...]
 #
-# Executes the command and prepends the prefix to every line of its combined
-# stdout+stderr. Records are split on \r\n, \r, or \n -- longest match
-# first, so a CRLF pair is ONE separator; splitting on the characters
+# Executes the command and prepends the prefix to every line of its
+# combined stdout+stderr. Records are split on \r\n, \r, or \n -- longest
+# match first, so a CRLF pair is ONE separator (splitting on the chars
 # individually would yield an empty record between \r and \n, which came
-# out as a spurious prefix-only line after every completed pv display.
+# out as a spurious prefix-only line after every completed pv display).
 # Bare \r stays a separator of its own, so progress bars keep refreshing
-# in place with the prefix intact. The fflush() is
-# load-bearing: stdio only flushes on \n, and pv's in-place updates end in a
-# bare \r -- without an explicit flush they sit in gawk's buffer until the
-# transfer ends, which is why an earlier version of this appeared to produce
-# no output at all.
+# in place with the prefix intact.
 #
-# ZFSRECVD_INDENT tells descendants how many columns of prefix will be glued
-# onto their lines: anything that sizes output to the terminal width (pv, see
-# send.sh) must shrink by that amount, or the line exceeds the terminal
-# width, wraps, and \r-refreshes land on fresh rows instead of overwriting.
+# Pure bash byte loop, NOT gawk, and that is load-bearing: gawk with a
+# regex RS holds every record until the byte AFTER the separator arrives
+# (empirically true even for a plain \n match that cannot be extended),
+# so each line lags one record behind. Invisible while pv chatters; but
+# when a line is followed by silence -- an hours-long transfer with pv
+# quiet, a long dry-run estimate -- the line sits inside gawk for the
+# whole stretch and the live board shows a stale header instead. Found
+# on the first real T run: a multi-TB send displayed "tree [...]" start
+# to finish. The bash loop's only peek is one byte after \r (CRLF
+# detection), which the very next progress byte resolves.
+#
+# Only sendtree's chatter and pv's progress flow through here (never the
+# zfs stream), so the byte loop's throughput is a non-issue.
+#
+# ZFSRECVD_INDENT tells descendants how many columns of prefix will be
+# glued onto their lines: anything that sizes output to the terminal
+# width (pv, see sendtree.sh) must shrink by that amount, or the line
+# exceeds the terminal width, wraps, and \r-refreshes land on fresh rows
+# instead of overwriting.
 #
 # Returns the command's exit status, not the pipeline's.
 
-if command -v gawk >/dev/null 2>&1; then
-    run_indented() {
-        local prefix=$1; shift
-        ZFSRECVD_INDENT=$(( ${ZFSRECVD_INDENT:-0} + ${#prefix} )) \
-        "$@" 2>&1 | gawk -v p="$prefix" '
-            BEGIN       { RS = "\r\n|\r|\n"; ORS = "" }
-            { printf "%s%s%s", p, $0, RT; fflush() }
-        '
-        return "${PIPESTATUS[0]}"
+run_indented() {
+    local prefix=$1; shift
+    ZFSRECVD_INDENT=$(( ${ZFSRECVD_INDENT:-0} + ${#prefix} )) \
+    "$@" 2>&1 | {
+        # one printf per completed record = one write(): concurrent jobs
+        # interleave at record granularity, the same guarantee gawk gave
+        local buf="" ch="" pending_cr=""
+        while IFS= read -r -d '' -n 1 ch; do
+            if [[ -n "$pending_cr" ]]; then
+                pending_cr=""
+                if [[ "$ch" == $'\n' ]]; then
+                    printf '%s%s\r\n' "$prefix" "$buf"
+                    buf=""
+                    continue
+                fi
+                printf '%s%s\r' "$prefix" "$buf"
+                buf=""
+            fi
+            case "$ch" in
+                $'\r') pending_cr=1 ;;
+                $'\n') printf '%s%s\n' "$prefix" "$buf"; buf="" ;;
+                *)     buf+="$ch" ;;
+            esac
+        done
+        # EOF: a trailing \r is a complete record; a bare unterminated
+        # tail is emitted as-is
+        if [[ -n "$pending_cr" ]]; then
+            printf '%s%s\r' "$prefix" "$buf"
+        elif [[ -n "$buf" ]]; then
+            printf '%s%s' "$prefix" "$buf"
+        fi
     }
-else
-    # No gawk (RT is a gawk-ism): degrade to running the command unprefixed.
-    run_indented() {
-        shift
-        "$@"
-    }
-fi
+    return "${PIPESTATUS[0]}"
+}

@@ -172,11 +172,25 @@ n_src=$(sudo zfs list -H -t snapshot -d 1 -o name ztest/src | grep -c zfsrecvd-)
 check "T8 source pruned to 1 (got $n_src)" test "$n_src" = "1"
 n_dst=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST" | grep -c zfsrecvd-)
 check "T8 dest history kept (got $n_dst)" test "$n_dst" -ge 2
+check "T8 prune logged to source journal" bash -c "sudo journalctl -t zfsrecvd-prune -n 20 --no-pager | grep -q pruning"
+
+echo "=== T9: offline participant is dropped, the rest of the run proceeds ==="
+# nosuchuser@localhost: sshd refuses auth instantly, which is the fastest
+# deterministic provisioning failure. (A 127.x.y.z address does NOT work
+# for this: sshd binds 0.0.0.0, which answers on all of 127/8, and the
+# "dead" host would provision onto the VM itself.)
+sed '/^vmrecv2/a deadhost  ssh=nosuchuser@localhost   recv=ztest/recv' ~/fleet-test.conf > ~/fleet-offline.conf
+echo "$CN   ztest/src   deadhost" >> ~/fleet-offline.conf
+/etc/zfsrecvd/fleetrun.sh -c ~/fleet-offline.conf >/tmp/fleet6.log 2>&1
+rc=$?
+check "T9 rc=1 (degraded run)" test "$rc" -eq 1
+grep -q "dropping its jobs" /tmp/fleet6.log && ok "T9 offline host dropped" || { bad "T9 drop message"; tail -n 20 /tmp/fleet6.log; }
+grep -q "run summary: 2 jobs, 2 ok" /tmp/fleet6.log && ok "T9 remaining jobs ran clean" || { bad "T9 summary"; tail -n 20 /tmp/fleet6.log; }
 
 echo
 echo "=== RESULT: $PASS passed, $FAIL failed ==="
 if [ "$FAIL" -gt 0 ]; then
-    for f in /tmp/fleet1.log /tmp/fleet2.log /tmp/fleet3.log /tmp/fleet4.log /tmp/fleet5.log; do
+    for f in /tmp/fleet1.log /tmp/fleet2.log /tmp/fleet3.log /tmp/fleet4.log /tmp/fleet5.log /tmp/fleet6.log; do
         [ -f "$f" ] && { echo "--- $f tail ---"; tail -n 25 "$f"; }
     done
     for u in zfsrecvd-run-vmrecv zfsrecvd-run-vmrecv2; do

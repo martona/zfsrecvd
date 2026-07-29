@@ -37,7 +37,7 @@ RUN_REMOTE_BASE="/etc/zfsrecvd/run"
 # The scripts every participant gets refreshed with on every run, from
 # this orchestrator's /etc/zfsrecvd (keep in sync with deploy.sh's list).
 # Shipping them per run makes participants stateless: a brand-new sender
-# needs only ssh, sudo, and the packages (zfs, socat, pv, gawk) -- no
+# needs only ssh, sudo, and the packages (zfs, socat, pv) -- no
 # prior deploy.sh visit. --unlink-first so a script that is executing
 # right now is replaced via a fresh inode, never truncated.
 FLEET_SCRIPTS=(
@@ -110,6 +110,7 @@ export ZFSRECVD_SKIP_LOCK=1
 rundir=$(mktemp -d /tmp/zfsrecvd-fleet.XXXXXX)
 provisioned=()
 listeners=()
+declare -A prov_failed=()    # identity -> 1; dropped from the run, forces rc 1
 
 is_receiver() {
     local r
@@ -140,7 +141,10 @@ fleet_teardown() {
         fleet_ssh "$dest" "sudo -n systemctl stop zfsrecvd-run-$h 2>/dev/null; sudo -n systemctl reset-failed zfsrecvd-run-$h 2>/dev/null" \
             </dev/null || echo "WARNING: could not stop run listener on [$h]" >&2
     done
-    for h in "${provisioned[@]}"; do
+    # prov_failed hosts too: a mid-provision failure can leave a partial
+    # run dir behind, and the cleanup attempt is cheap if they are still
+    # offline (fast refusal or one timeout).
+    for h in "${provisioned[@]}" "${!prov_failed[@]}"; do
         dest=$(fleet_ssh_dest "$h")
         fleet_ssh "$dest" "sudo -n rm -rf $RUN_REMOTE_BASE/$h; sudo -n rmdir $RUN_REMOTE_BASE 2>/dev/null || true" \
             </dev/null || echo "WARNING: could not remove $RUN_REMOTE_BASE/$h on [$h]" >&2
@@ -231,32 +235,49 @@ provision_host() {   # $1 = host identity
     echo "provisioning [$id] ($dest)" >&2
 
     # dependency preflight + key/CSR minted on the host; only the CSR
-    # travels back
-    fleet_ssh "$dest" "for b in zfs socat pv openssl; do command -v \$b >/dev/null || { echo \"missing dependency on this host: \$b\" >&2; exit 9; }; done; sudo -n mkdir -p $rdir && sudo -n chmod 700 $rdir && sudo -n openssl req -new -newkey rsa:2048 -nodes -keyout $rdir/client.key -subj /CN=$id 2>/dev/null && sudo -n chmod 600 $rdir/client.key" \
-        </dev/null > "$rundir/$id.csr"
+    # travels back. Every step reports and RETURNS 1 instead of dying: one
+    # offline box must not take the whole fleet's run down -- the caller
+    # drops the host's jobs and carries on (learned on the first real T
+    # run, when a powered-off virtualboy killed all 70 jobs). NB set -e
+    # is suppressed inside a function called under "if !", so the error
+    # handling here must be explicit.
+    if ! fleet_ssh "$dest" "for b in zfs socat pv openssl; do command -v \$b >/dev/null || { echo \"missing dependency on this host: \$b\" >&2; exit 9; }; done; sudo -n mkdir -p $rdir && sudo -n chmod 700 $rdir && sudo -n openssl req -new -newkey rsa:2048 -nodes -keyout $rdir/client.key -subj /CN=$id 2>/dev/null && sudo -n chmod 600 $rdir/client.key" \
+        </dev/null > "$rundir/$id.csr"; then
+        echo "ERROR: [$id] unreachable or failed preflight" >&2
+        return 1
+    fi
     if ! grep -q "BEGIN CERTIFICATE REQUEST" "$rundir/$id.csr"; then
         echo "ERROR: no CSR from [$id]" >&2
-        exit 1
+        return 1
     fi
 
     # sign with the run CA; SANs carry identity and dial name (H needs SANs)
     printf 'subjectAltName=DNS:%s,DNS:%s\n' "$id" "$data" > "$rundir/$id.ext"
     openssl x509 -req -in "$rundir/$id.csr" -CA "$rundir/ca.pem" -CAkey "$rundir/ca.key" \
         -CAcreateserial -days 365 -extfile "$rundir/$id.ext" -out "$bdir/client.pem" 2>/dev/null
-    grep -q "BEGIN CERTIFICATE" "$bdir/client.pem" || { echo "ERROR: signing failed for [$id]" >&2; exit 1; }
+    if ! grep -q "BEGIN CERTIFICATE" "$bdir/client.pem"; then
+        echo "ERROR: signing failed for [$id]" >&2
+        return 1
+    fi
 
     # one key+cert serves both roles: no EKU restriction, both names in SAN
     cp "$bdir/client.pem" "$bdir/server.pem"
     cp "$rundir/ca.pem" "$bdir/ca.pem"
     gen_run_conf "$id"
 
-    tar czf - -C "$bdir" . | fleet_ssh "$dest" \
-        "sudo -n tar xzf - -C $rdir && sudo -n cp $rdir/client.key $rdir/server.key && sudo -n chmod 600 $rdir/server.key"
+    if ! tar czf - -C "$bdir" . | fleet_ssh "$dest" \
+        "sudo -n tar xzf - -C $rdir && sudo -n cp $rdir/client.key $rdir/server.key && sudo -n chmod 600 $rdir/server.key"; then
+        echo "ERROR: bundle ship to [$id] failed" >&2
+        return 1
+    fi
 
     # refresh the scripts themselves: participants are stateless, no prior
     # deploy.sh visit required, and version skew cannot exist within a run
-    tar czf - -C /etc/zfsrecvd "${FLEET_SCRIPTS[@]}" | fleet_ssh "$dest" \
-        "sudo -n mkdir -p /etc/zfsrecvd && sudo -n tar xzf - -C /etc/zfsrecvd --unlink-first"
+    if ! tar czf - -C /etc/zfsrecvd "${FLEET_SCRIPTS[@]}" | fleet_ssh "$dest" \
+        "sudo -n mkdir -p /etc/zfsrecvd && sudo -n tar xzf - -C /etc/zfsrecvd --unlink-first"; then
+        echo "ERROR: script ship to [$id] failed" >&2
+        return 1
+    fi
     provisioned+=( "$id" )
 }
 
@@ -274,26 +295,41 @@ start_listener() {   # $1 = receiver identity
     fi
     echo "starting run listener on [$id] (port $fleet_opt_port)" >&2
     fleet_ssh "$dest" "sudo -n systemctl stop $unit 2>/dev/null; sudo -n systemctl reset-failed $unit 2>/dev/null; sudo -n systemd-run --unit=$unit --setenv=ZFSRECVD_CONF=$RUN_REMOTE_BASE/$id/run.conf /etc/zfsrecvd/listen.sh >/dev/null 2>&1; for i in \$(seq 1 40); do ss -tln | grep -qF '$bindpat' && exit 0; sleep 0.25; done; echo 'run listener failed to bind:' >&2; sudo -n journalctl -u $unit -n 10 --no-pager >&2; exit 1" \
-        </dev/null
+        </dev/null || return 1
     listeners+=( "$id" )
 }
 
 for h in "${fleet_participants[@]}"; do
-    provision_host "$h"
+    if ! provision_host "$h"; then
+        prov_failed[$h]=1
+        echo "ERROR: provisioning [$h] failed; dropping its jobs from this run" >&2
+    fi
 done
 for h in "${fleet_receivers[@]}"; do
-    start_listener "$h"
+    if [[ -n "${prov_failed[$h]:-}" ]]; then
+        continue
+    fi
+    if ! start_listener "$h"; then
+        prov_failed[$h]=1
+        echo "ERROR: run listener on [$h] failed; dropping its jobs from this run" >&2
+    fi
 done
 
 #
 # ---------- 4. generated orchestrator config + execute -----------------------
 #
+runnable=0
 {
     printf '# generated by fleetrun %s -- do not edit\n' "$run_id"
     printf '[orchestrator-workers]\n%s\n' "$fleet_opt_workers"
     printf '[orchestrator-jobs]\n'
     # <source-id> <user@host> <run.conf> <tree> <dest-id> <dial>
+    # jobs touching a host that failed provisioning are dropped here
     for (( i = 0; i < ${#fleet_job_src[@]}; i++ )); do
+        if [[ -n "${prov_failed[${fleet_job_src[i]}]:-}" || -n "${prov_failed[${fleet_job_dest[i]}]:-}" ]]; then
+            continue
+        fi
+        runnable=$(( runnable + 1 ))
         printf '%s %s %s/%s/run.conf %s %s %s\n' \
             "${fleet_job_src[i]}" "$(fleet_ssh_dest "${fleet_job_src[i]}")" \
             "$RUN_REMOTE_BASE" "${fleet_job_src[i]}" \
@@ -304,6 +340,11 @@ done
     # provisioning); the child orchestrate gets an empty wake set.
 } > "$rundir/orchestrator.conf"
 
+if (( runnable == 0 )); then
+    echo "ERROR: no runnable jobs remain after provisioning failures" >&2
+    exit 1
+fi
+
 echo "executing run $run_id" >&2
 set +e
 ZFSRECVD_CONF="$rundir/orchestrator.conf" \
@@ -311,5 +352,9 @@ ZFSRECVD_CONF="$rundir/orchestrator.conf" \
 orch_rc=$?
 set -e
 
+if (( ${#prov_failed[@]} > 0 )); then
+    echo "WARNING: hosts dropped by provisioning/listener failures: ${!prov_failed[*]}" >&2
+    orch_rc=1
+fi
 echo "run $run_id finished (rc=$orch_rc); tearing down" >&2
 exit "$orch_rc"
