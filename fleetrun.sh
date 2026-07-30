@@ -528,13 +528,23 @@ fi
 # Orphan GC pass, warn-only (PROTOCOL.md §22): summary-class output,
 # printed in every mode -- these are the loud advance warnings the GC
 # doctrine requires, plus the owner's "old crap" listing.
+# The GC test knobs forward over ssh (numeric-validated): the natural
+# way to use them is on the fleetrun command line, and env does not
+# cross ssh by itself (bit the owner's first grace-knob experiment).
+gcenv=""
+if [[ "${ZFSRECVD_GC_CAND_DAYS:-}" =~ ^[0-9]+$ ]]; then
+    gcenv+=" ZFSRECVD_GC_CAND_DAYS=${ZFSRECVD_GC_CAND_DAYS}"
+fi
+if [[ "${ZFSRECVD_GC_GRACE_DAYS:-}" =~ ^[0-9]+$ ]]; then
+    gcenv+=" ZFSRECVD_GC_GRACE_DAYS=${ZFSRECVD_GC_GRACE_DAYS}"
+fi
 for h in "${fleet_receivers[@]}"; do
     if [[ -n "${prov_failed[$h]:-}" ]]; then
         continue
     fi
     echo "gc: [$h]" >&2
     fleet_ssh "$(fleet_ssh_dest "$h")" \
-        "sudo -n env ZFSRECVD_CONF=$RUN_REMOTE_BASE/$h/run.conf /etc/zfsrecvd/gc.sh" \
+        "sudo -n env ZFSRECVD_CONF=$RUN_REMOTE_BASE/$h/run.conf$gcenv /etc/zfsrecvd/gc.sh" \
         </dev/null >&2 \
         || echo "WARNING: gc pass failed on [$h]" >&2
 done

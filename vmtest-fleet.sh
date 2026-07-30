@@ -266,8 +266,12 @@ echo "=== T15: orphan GC, warn-only ==="
 sudo zfs create ztest/recv/$CN/oldcrap
 sudo zfs create ztest/recv/$CN/stale
 sudo zfs set zfsrecvd:last-recv=2026-01-01T00:00:00Z ztest/recv/$CN/stale
+# deep unstamped child under a STAMPED parent: inherited properties must
+# not cloak it (the owner's no-such-zvol find)
+sudo zfs create "$DEST/deepcrap"
 out=$(sudo env ZFSRECVD_CONF=/etc/zfsrecvd/zfsrecvd.conf /etc/zfsrecvd/gc.sh 2>&1)
 grep -q "oldcrap: UNSTAMPED" <<<"$out" && ok "T15 unstamped crap surfaced" || { bad "T15 unstamped"; echo "$out"; }
+grep -q "deepcrap: UNSTAMPED" <<<"$out" && ok "T15 deep unstamped not cloaked by inheritance" || { bad "T15 deepcrap"; echo "$out"; }
 grep -q "stale: ORPHAN CANDIDATE" <<<"$out" && ok "T15 stale flagged" || { bad "T15 stale"; echo "$out"; }
 grep -q "/ztest: UNSTAMPED" <<<"$out" && bad "T15 container noise" || ok "T15 containers stay quiet"
 osv=$(sudo zfs get -H -o value zfsrecvd:orphan-since ztest/recv/$CN/stale)
@@ -278,10 +282,16 @@ out3=$(sudo env ZFSRECVD_GC_GRACE_DAYS=0 ZFSRECVD_CONF=/etc/zfsrecvd/zfsrecvd.co
 grep -q "stale: RECLAIM-ELIGIBLE" <<<"$out3" && ok "T15 grace knob turns down" || { bad "T15 knob"; echo "$out3"; }
 check "T15 nothing destroyed" sudo zfs list -H ztest/recv/$CN/oldcrap ztest/recv/$CN/stale
 
+echo "=== T16: GC knobs forward through fleetrun over ssh ==="
+ZFSRECVD_GC_CAND_DAYS=0 ZFSRECVD_GC_GRACE_DAYS=0 /etc/zfsrecvd/fleetrun.sh -c ~/fleet-test.conf >/tmp/fleet10.log 2>&1
+rc=$?
+check "T16 rc=0" test "$rc" -eq 0
+grep -q "eligible for reclaim in 0d" /tmp/fleet10.log && ok "T16 knobs reached the receiver" || { bad "T16 knobs"; grep -a "GC:" /tmp/fleet10.log | head -n 8; }
+
 echo
 echo "=== RESULT: $PASS passed, $FAIL failed ==="
 if [ "$FAIL" -gt 0 ]; then
-    for f in /tmp/fleet1.log /tmp/fleet2.log /tmp/fleet3.log /tmp/fleet4.log /tmp/fleet5.log /tmp/fleet6.log /tmp/fleet7.log /tmp/fleet8.log /tmp/fleet9.log; do
+    for f in /tmp/fleet1.log /tmp/fleet2.log /tmp/fleet3.log /tmp/fleet4.log /tmp/fleet5.log /tmp/fleet6.log /tmp/fleet7.log /tmp/fleet8.log /tmp/fleet9.log /tmp/fleet10.log; do
         [ -f "$f" ] && { echo "--- $f tail ---"; tail -n 25 "$f"; }
     done
     for u in zfsrecvd-run-vmrecv zfsrecvd-run-vmrecv2 zfsrecvd-ha-vmrecv zfsrecvd-ha-vmrecv2; do

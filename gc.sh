@@ -44,22 +44,33 @@ while IFS= read -r cnroot; do
     n_unst=0
     declare -A lr=() osince=()
     dss=()
-    while IFS=$'\t' read -r ds v_lr v_os; do
+    declare -A _seen=()
+    while IFS=$'\t' read -r ds prop val src; do
         [[ "$ds" != "$cnroot" ]] || continue
-        dss+=( "$ds" )
-        if [[ "$v_lr" != "-" ]]; then
-            e=$(date -u -d "$v_lr" +%s 2>/dev/null) || e=0
+        if [[ -z "${_seen[$ds]:-}" ]]; then
+            _seen[$ds]=1
+            dss+=( "$ds" )
+        fi
+        # User properties INHERIT: a freshly-stamped parent cloaks every
+        # unstamped child if effective values are trusted (bit the
+        # owner's deep test dataset on day one). Only source=local is a
+        # stamp; inherited values are nothing.
+        [[ "$src" == "local" ]] || continue
+        if [[ "$prop" == "zfsrecvd:last-recv" && "$val" != "-" ]]; then
+            e=$(date -u -d "$val" +%s 2>/dev/null) || e=0
             lr[$ds]=$e
             (( e > newest )) && newest=$e
+        elif [[ "$prop" == "zfsrecvd:orphan-since" && "$val" != "-" ]]; then
+            osince[$ds]="$val"
         fi
-        [[ "$v_os" != "-" ]] && osince[$ds]="$v_os"
-    done < <(zfs list -H -r -t filesystem,volume \
-        -o name,zfsrecvd:last-recv,zfsrecvd:orphan-since "$cnroot" 2>/dev/null)
+    done < <(zfs get -H -r -t filesystem,volume \
+        -o name,property,value,source zfsrecvd:last-recv,zfsrecvd:orphan-since \
+        "$cnroot" 2>/dev/null)
 
     if (( newest == 0 )); then
         [[ ${#dss[@]} -gt 0 ]] \
             && say "$cnroot: no stamps anywhere; nothing assessed (pre-v2 or foreign subtree)"
-        unset lr osince
+        unset lr osince _seen
         continue
     fi
 
@@ -102,7 +113,7 @@ while IFS= read -r cnroot; do
     done
     # client summary (owner report wishlist): one line per CN, always
     say "$cnroot: ${#dss[@]} datasets, newest recv $(( (now - newest) / 86400 ))d ago, ${n_cand} orphan candidate(s), ${n_unst} unstamped"
-    unset lr osince
+    unset lr osince _seen
 done < <(zfs list -H -d 1 -t filesystem -o name "$recv_root" 2>/dev/null || true)
 
 exit 0
