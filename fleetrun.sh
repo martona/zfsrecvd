@@ -88,6 +88,14 @@ done
 
 run_id="run-$(date -u +%Y%m%d-%H%M%S)"
 
+# defined ahead of the cadence filter: the reachability probes are its
+# first caller (a later definition once cost every probe a silent 127)
+fleet_ssh() {   # <user@addr> <command...>
+    local dest="$1"
+    shift
+    ssh "${ssh_opts[@]}" "$dest" "$@"
+}
+
 report_dir=""
 report_dir_resolve() {
     report_dir="/var/log/zfsrecvd"
@@ -106,9 +114,8 @@ append_cadence_jobs() {
     fi
     ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     for (( i = 0; i < ${#cad_src[@]}; i++ )); do
-        printf '{"ts":"%s","snap":"","src":"%s","tree":"%s","dst":"%s","state":"cadence","rc":"0","why":"last ok %s (cadence %s)","failed_ds":"","secs":0}\n' \
-            "$ts" "${cad_src[i]}" "${cad_tree[i]}" "${cad_dest[i]}" \
-            "${cad_ok[i]}" "${fleet_host_cadence[${cad_dest[i]}]}"
+        printf '{"ts":"%s","snap":"","src":"%s","tree":"%s","dst":"%s","state":"cadence","rc":"0","why":"%s","failed_ds":"","secs":0}\n' \
+            "$ts" "${cad_src[i]}" "${cad_tree[i]}" "${cad_dest[i]}" "${cad_why[i]}"
     done >> "$report_dir/runs.jsonl" 2>/dev/null || true
 }
 
@@ -121,7 +128,7 @@ append_cadence_jobs() {
 # wake-set/participant derivation, so a fully-fresh EC2 destination is
 # never even woken. ISO-8601 UTC timestamps compare as plain strings --
 # no date parsing, no mktime (mawk-safe by construction).
-cad_src=(); cad_tree=(); cad_dest=(); cad_ok=()
+cad_src=(); cad_tree=(); cad_dest=(); cad_ok=(); cad_why=()
 declare -A cad_n=() cad_newest=()
 has_cadence=""
 for h in "${fleet_receivers[@]}"; do
@@ -158,29 +165,73 @@ if [[ -n "$has_cadence" && -z "$force_ec2" ]]; then
             END { for (k in best) printf "%s\t%s\n", k, best[k] }
         ' "$ledger")
     fi
+    # A stale tuple only forces the wake if its SOURCE is reachable right
+    # now (owner 2026-07-30: sometimes-offline sources must not keep EC2
+    # permanently awake -- any one stale tuple would otherwise block the
+    # skip forever). Probe only the sources that would block, in
+    # parallel; an offline source's cadence-dest jobs skip this run with
+    # the window not consulted, and the first run after it returns sees
+    # the stale tuple again and wakes as normal. Its jobs to
+    # non-cadence destinations are untouched (they fail provisioning
+    # loudly, rc=1, as today).
+    declare -A probe_set=() src_reach=()
+    for (( i = 0; i < ${#fleet_job_src[@]}; i++ )); do
+        d="${fleet_job_dest[i]}"
+        csec=$(fleet_cadence_secs "$d")
+        if [[ -n "$csec" ]]; then
+            cutoff=$(date -u -d "-${csec} seconds" +%Y-%m-%dT%H:%M:%SZ)
+            lok="${last_ok[${fleet_job_src[i]}|${fleet_job_tree[i]}|$d]:-}"
+            if [[ -z "$lok" || "$lok" < "$cutoff" ]]; then
+                probe_set[${fleet_job_src[i]}]=1
+            fi
+        fi
+    done
+    probe_pids=(); probe_hosts=()
+    for h in "${fleet_sources[@]}"; do
+        if [[ -n "${probe_set[$h]:-}" ]]; then
+            fleet_ssh "$(fleet_ssh_dest "$h")" true </dev/null >/dev/null 2>&1 &
+            probe_pids+=( $! )
+            probe_hosts+=( "$h" )
+        fi
+    done
+    for (( i = 0; i < ${#probe_pids[@]}; i++ )); do
+        if wait "${probe_pids[i]}"; then
+            src_reach[${probe_hosts[i]}]=1
+        else
+            echo "cadence: source [${probe_hosts[i]}] unreachable; its jobs to cadence destinations skip this run" >&2
+        fi
+    done
     _pre_recv=( "${fleet_receivers[@]}" )
     _keep_src=(); _keep_tree=(); _keep_dest=()
     for (( i = 0; i < ${#fleet_job_src[@]}; i++ )); do
         d="${fleet_job_dest[i]}"
+        s="${fleet_job_src[i]}"
         csec=$(fleet_cadence_secs "$d")
         drop=""
         if [[ -n "$csec" ]]; then
             cutoff=$(date -u -d "-${csec} seconds" +%Y-%m-%dT%H:%M:%SZ)
-            lok="${last_ok[${fleet_job_src[i]}|${fleet_job_tree[i]}|$d]:-}"
+            lok="${last_ok[$s|${fleet_job_tree[i]}|$d]:-}"
             if [[ -n "$lok" && ! "$lok" < "$cutoff" ]]; then
                 drop=1
-                cad_src+=( "${fleet_job_src[i]}" )
-                cad_tree+=( "${fleet_job_tree[i]}" )
-                cad_dest+=( "$d" )
                 cad_ok+=( "$lok" )
+                cad_why+=( "last ok $lok (cadence ${fleet_host_cadence[$d]})" )
                 cad_n[$d]=$(( ${cad_n[$d]:-0} + 1 ))
                 if [[ "$lok" > "${cad_newest[$d]:-}" ]]; then
                     cad_newest[$d]="$lok"
                 fi
+            elif [[ -n "${probe_set[$s]:-}" && -z "${src_reach[$s]:-}" ]]; then
+                drop=1
+                cad_ok+=( "-" )
+                cad_why+=( "source unreachable; cadence window not consulted" )
+            fi
+            if [[ -n "$drop" ]]; then
+                cad_src+=( "$s" )
+                cad_tree+=( "${fleet_job_tree[i]}" )
+                cad_dest+=( "$d" )
             fi
         fi
         if [[ -z "$drop" ]]; then
-            _keep_src+=( "${fleet_job_src[i]}" )
+            _keep_src+=( "$s" )
             _keep_tree+=( "${fleet_job_tree[i]}" )
             _keep_dest+=( "${fleet_job_dest[i]}" )
         fi
@@ -303,12 +354,6 @@ if [[ "$fleet_opt_transport" == "haproxy" ]]; then
         _ri=$(( _ri + 1 ))
     done
 fi
-
-fleet_ssh() {   # <user@addr> <command...>
-    local dest="$1"
-    shift
-    ssh "${ssh_opts[@]}" "$dest" "$@"
-}
 
 fleet_teardown() {
     # stop + reset-failed are best-effort: a CLEANLY stopped transient

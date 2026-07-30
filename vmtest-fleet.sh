@@ -329,6 +329,21 @@ grep -q "nothing to do" /tmp/fleet13.log && ok "T17 all-skip announced" || { bad
 grep -q "minted run CA" /tmp/fleet13.log && bad "T17 all-skip still provisioned" || ok "T17 all-skip provisions nothing"
 /etc/zfsrecvd/report.sh 2>/dev/null | grep -q "0 ok, 0 not ok, 2 within cadence" && ok "T17 all-skip report tally" || { bad "T17 tally"; /etc/zfsrecvd/report.sh 2>&1 | head -n 5; }
 
+# an UNREACHABLE source with a stale tuple must not force the wake
+# (owner: sometimes-offline sources would otherwise keep EC2 awake
+# forever); its cadence-dest jobs skip with the window not consulted.
+# nosuchuser@localhost refuses auth instantly (T9 precedent).
+cp ~/fleet-cad.conf ~/fleet-cad3.conf
+printf '[hosts]\nnosuchsrc ssh=nosuchuser@localhost\n[jobs]\nnosuchsrc ztest/src vmrecv2\n' >> ~/fleet-cad3.conf
+/etc/zfsrecvd/fleetrun.sh -c ~/fleet-cad3.conf >/tmp/fleet15.log 2>&1
+rc=$?
+check "T17 offline-source rc=0" test "$rc" -eq 0
+grep -q "cadence: source \[nosuchsrc\] unreachable" /tmp/fleet15.log && ok "T17 offline source announced" || { bad "T17 offline announce"; grep -a "cadence" /tmp/fleet15.log; }
+grep -q "starting run listener on \[vmrecv2\]" /tmp/fleet15.log && bad "T17 offline-source dest still provisioned" || ok "T17 offline-source dest stays asleep"
+grep -qF '"src":"nosuchsrc","tree":"ztest/src","dst":"vmrecv2","state":"cadence","rc":"0","why":"source unreachable' "$RJ" && ok "T17 offline skip in jsonl" || { bad "T17 offline jsonl"; tail -n 4 "$RJ"; }
+/etc/zfsrecvd/report.sh 2>/dev/null | grep -q "1 within cadence, 1 source offline" && ok "T17 report splits offline from cadence" || { bad "T17 offline tally"; /etc/zfsrecvd/report.sh 2>&1 | head -n 8; }
+grep -q "0 failed" /tmp/fleet15.log && ok "T17 offline-source run clean" || { bad "T17 offline failures"; tail -n 20 /tmp/fleet15.log; }
+
 # age the whole ledger out of the window (ISO ts compares as a string;
 # 19xx loses to any cutoff): everything runs again
 sed -i 's/"ts":"20/"ts":"19/g' "$RJ"
@@ -342,7 +357,7 @@ grep -q "0 failed" /tmp/fleet14.log && ok "T17 expired-window run clean" || { ba
 echo
 echo "=== RESULT: $PASS passed, $FAIL failed ==="
 if [ "$FAIL" -gt 0 ]; then
-    for f in /tmp/fleet1.log /tmp/fleet2.log /tmp/fleet3.log /tmp/fleet4.log /tmp/fleet5.log /tmp/fleet6.log /tmp/fleet7.log /tmp/fleet8.log /tmp/fleet9.log /tmp/fleet10.log /tmp/fleet11.log /tmp/fleet12.log /tmp/fleet13.log /tmp/fleet14.log; do
+    for f in /tmp/fleet1.log /tmp/fleet2.log /tmp/fleet3.log /tmp/fleet4.log /tmp/fleet5.log /tmp/fleet6.log /tmp/fleet7.log /tmp/fleet8.log /tmp/fleet9.log /tmp/fleet10.log /tmp/fleet11.log /tmp/fleet12.log /tmp/fleet13.log /tmp/fleet14.log /tmp/fleet15.log; do
         [ -f "$f" ] && { echo "--- $f tail ---"; tail -n 25 "$f"; }
     done
     for u in zfsrecvd-run-vmrecv zfsrecvd-run-vmrecv2 zfsrecvd-ha-vmrecv zfsrecvd-ha-vmrecv2; do

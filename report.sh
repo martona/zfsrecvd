@@ -57,11 +57,14 @@ END {
     if (runs == 0) { print "no complete runs recorded yet"; exit }
     r = runs
     printf "last run: %s  (%s, rc %s)\n", g(rline[r], "run"), g(rline[r], "ts"), g(rline[r], "rc")
-    ok = 0; bad = 0; cad = 0
+    ok = 0; bad = 0; cad = 0; unr = 0
     for (i = jstart[r]; i <= jend[r]; i++) {
         st = g(J[i], "state"); rc = g(J[i], "rc")
         if (st == "done" && rc == "0") { ok++; continue }
-        if (st == "cadence") { cad++; continue }
+        if (st == "cadence") {
+            if (g(J[i], "why") ~ /^source unreachable/) unr++; else cad++
+            continue
+        }
         bad++
         fd = g(J[i], "failed_ds")
         printf "  FAIL  [%s] %s -> [%s]  (%s rc=%s) %s%s\n", \
@@ -70,6 +73,7 @@ END {
     }
     printf "  jobs: %d ok, %d not ok", ok, bad
     if (cad > 0) printf ", %d within cadence", cad
+    if (unr > 0) printf ", %d source offline", unr
     printf "\n"
 
     # receivers table: numbers right-aligned, widths from content
