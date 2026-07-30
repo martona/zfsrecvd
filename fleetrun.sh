@@ -440,6 +440,17 @@ for h in "${fleet_participants[@]}"; do
         echo "ERROR: provisioning [$h] failed; dropping its jobs from this run" >&2
     fi
 done
+
+# Space accounting for the run report: recv_root `used` before any bytes
+# move; the delta at the end is the run's net effect on the pool.
+declare -A rused_before=()
+for h in "${fleet_receivers[@]}"; do
+    if [[ -z "${prov_failed[$h]:-}" ]]; then
+        rused_before[$h]=$(fleet_ssh "$(fleet_ssh_dest "$h")" \
+            "zfs get -Hp -o value used ${fleet_host_recv[$h]}" </dev/null 2>/dev/null) \
+            || rused_before[$h]=""
+    fi
+done
 for h in "${fleet_receivers[@]}"; do
     if [[ -n "${prov_failed[$h]:-}" ]]; then
         continue
@@ -526,6 +537,44 @@ for h in "${fleet_receivers[@]}"; do
         </dev/null >&2 \
         || echo "WARNING: gc pass failed on [$h]" >&2
 done
+
+#
+# ---------- run report v1 (PROTOCOL.md §22): net / pruned / avail ------------
+#
+report_json=""
+for h in "${fleet_receivers[@]}"; do
+    if [[ -n "${prov_failed[$h]:-}" ]]; then
+        continue
+    fi
+    vals=$(fleet_ssh "$(fleet_ssh_dest "$h")" \
+        "zfs get -Hp -o value used,avail ${fleet_host_recv[$h]}; sudo -n cat $RUN_REMOTE_BASE/$h/pruned.bytes 2>/dev/null || true" \
+        </dev/null 2>/dev/null) || vals=""
+    r_used=$(sed -n 1p <<<"$vals")
+    r_avail=$(sed -n 2p <<<"$vals")
+    r_pruned=$(sed -n '3,$p' <<<"$vals" | awk '{s+=$1} END{printf "%d", s+0}')
+    r_before="${rused_before[$h]:-}"
+    if [[ "$r_used" =~ ^[0-9]+$ && "$r_before" =~ ^[0-9]+$ ]]; then
+        r_net=$(( r_used - r_before ))
+        r_sign=""
+        (( r_net >= 0 )) && r_sign="+"
+        echo "report: [$h] net ${r_sign}$(numfmt --to=iec -- "$r_net" 2>/dev/null || echo "$r_net")B, pruned $(numfmt --to=iec -- "$r_pruned" 2>/dev/null || echo "$r_pruned")B, avail $(numfmt --to=iec -- "${r_avail:-0}" 2>/dev/null || echo "$r_avail")B" >&2
+        report_json="${report_json}${report_json:+,}{\"id\":\"$h\",\"before\":$r_before,\"after\":$r_used,\"avail\":${r_avail:-0},\"pruned\":$r_pruned}"
+    else
+        echo "report: [$h] space accounting unavailable this run" >&2
+    fi
+done
+if [[ -n "$report_json" ]]; then
+    report_dir="/var/log/zfsrecvd"
+    if ! mkdir -p "$report_dir" 2>/dev/null || [[ ! -w "$report_dir" ]]; then
+        report_dir="${XDG_STATE_HOME:-$HOME/.local/state}/zfsrecvd"
+        mkdir -p "$report_dir" 2>/dev/null || report_dir=""
+    fi
+    if [[ -n "$report_dir" ]]; then
+        printf '{"ts":"%s","kind":"run","run":"%s","rc":%s,"recv":[%s]}\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$run_id" "$orch_rc" "$report_json" \
+            >> "$report_dir/runs.jsonl" 2>/dev/null || true
+    fi
+fi
 
 echo "run $run_id finished (rc=$orch_rc); tearing down" >&2
 exit "$orch_rc"

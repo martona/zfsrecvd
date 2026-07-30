@@ -40,6 +40,8 @@ while IFS= read -r cnroot; do
 
     # one listing pass: name + both stamps for the whole CN subtree
     newest=0
+    n_cand=0
+    n_unst=0
     declare -A lr=() osince=()
     dss=()
     while IFS=$'\t' read -r ds v_lr v_os; do
@@ -71,12 +73,15 @@ while IFS= read -r cnroot; do
                     break
                 fi
             done
-            [[ -n "$has_stamped_child" ]] \
-                || say "$ds: UNSTAMPED -- never received under zfsrecvd"
+            if [[ -z "$has_stamped_child" ]]; then
+                n_unst=$(( n_unst + 1 ))
+                say "$ds: UNSTAMPED -- never received under zfsrecvd"
+            fi
             continue
         fi
         behind=$(( (newest - lr[$ds]) / 86400 ))
         if (( behind >= CAND_DAYS )); then
+            n_cand=$(( n_cand + 1 ))
             if [[ -z "${osince[$ds]:-}" ]]; then
                 stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
                 zfs set "zfsrecvd:orphan-since=$stamp" "$ds" 2>/dev/null || true
@@ -95,6 +100,8 @@ while IFS= read -r cnroot; do
             say "$ds: recovered -- receiving again; orphan clock cleared"
         fi
     done
+    # client summary (owner report wishlist): one line per CN, always
+    say "$cnroot: ${#dss[@]} datasets, newest recv $(( (now - newest) / 86400 ))d ago, ${n_cand} orphan candidate(s), ${n_unst} unstamped"
     unset lr osince
 done < <(zfs list -H -d 1 -t filesystem -o name "$recv_root" 2>/dev/null || true)
 

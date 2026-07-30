@@ -301,7 +301,7 @@ prune_tree() {
         fi
         psnaps[$ds]="${psnaps[$ds]:-}${psnaps[$ds]:+ }$snap"
     done < <(zfs list -H -r -t snapshot -s creation -o name "$dest_tree" 2>/dev/null || true)
-    local list=() doomed
+    local list=() doomed freed=0 b
     for ds in "${order[@]}"; do
         read -r -a list <<<"${psnaps[$ds]}"
         if [[ -n "$retain_spec" ]]; then
@@ -309,8 +309,11 @@ prune_tree() {
             while IFS= read -r name; do
                 [[ -n "$name" ]] || continue
                 log "pruning ${ds}@${name}"
+                b=$(zfs get -Hp -o value used "${ds}@${name}" 2>/dev/null) || b=0
+                [[ "$b" =~ ^[0-9]+$ ]] || b=0
                 if zfs destroy "${ds}@${name}" 2>/dev/null; then
                     pruned=$(( pruned + 1 ))
+                    freed=$(( freed + b ))
                 else
                     log "WARNING: failed to prune ${ds}@${name}"
                 fi
@@ -319,8 +322,11 @@ prune_tree() {
             extra=$(( ${#list[@]} - keep_count ))
             for (( i = 0; i < extra; i++ )); do
                 log "pruning ${list[i]}"
+                b=$(zfs get -Hp -o value used "${list[i]}" 2>/dev/null) || b=0
+                [[ "$b" =~ ^[0-9]+$ ]] || b=0
                 if zfs destroy "${list[i]}" 2>/dev/null; then
                     pruned=$(( pruned + 1 ))
+                    freed=$(( freed + b ))
                 else
                     log "WARNING: failed to prune ${list[i]}"
                 fi
@@ -328,7 +334,15 @@ prune_tree() {
         fi
     done
     if (( pruned > 0 )); then
-        log "pruned $pruned snapshots under $dest_tree"
+        # freed = sum of each snap's unique bytes at destroy time; blocks
+        # shared between adjacent doomed snaps are attributed to neither,
+        # so this UNDERestimates. Honest enough for the run report.
+        log "pruned $pruned snapshots under $dest_tree (~$freed bytes reclaimed)"
+        # per-run reclaim ledger for fleetrun's report -- run dirs only,
+        # never the static /etc/zfsrecvd
+        if [[ "$cert_dir" != "/etc/zfsrecvd" ]]; then
+            echo "$freed" >> "${cert_dir}/pruned.bytes" 2>/dev/null || true
+        fi
     fi
 }
 

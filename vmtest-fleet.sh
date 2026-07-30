@@ -236,7 +236,10 @@ grep -q "receiver-only snapshots.*@keepme-manual" /tmp/fleet8.log && ok "T12 rec
 grep -q "gc: \[vmrecv\]" /tmp/fleet8.log && ok "T12 gc stage ran" || { bad "T12 gc stage"; tail -n 20 /tmp/fleet8.log; }
 RJ="${XDG_STATE_HOME:-$HOME/.local/state}/zfsrecvd/runs.jsonl"
 check "T12 runs.jsonl written" test -s "$RJ"
-tail -n 2 "$RJ" | grep -q '"state":"done","rc":"0"' && ok "T12 jsonl records ok jobs" || { bad "T12 jsonl content"; tail -n 3 "$RJ"; }
+grep -q '"state":"done","rc":"0"' "$RJ" && ok "T12 jsonl records ok jobs" || { bad "T12 jsonl content"; tail -n 3 "$RJ"; }
+grep -q "report: \[vmrecv\] net" /tmp/fleet8.log && ok "T12 run report line" || { bad "T12 report"; grep -a "report:" /tmp/fleet8.log; }
+grep -q "\"kind\":\"run\"" "$RJ" && ok "T12 jsonl run record" || { bad "T12 run record"; tail -n 2 "$RJ"; }
+grep -q "datasets, newest recv" /tmp/fleet8.log && ok "T12 gc client summary" || { bad "T12 client summary"; grep -a "GC:" /tmp/fleet8.log | head -n 5; }
 
 echo "=== T13: replication cursors: exactly one per (dataset, dest) ==="
 n_c1=$(sudo zfs list -H -t bookmark -d 1 -o name ztest/src | grep -c '#zfsrecvd-vmrecv-')
