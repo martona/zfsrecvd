@@ -539,19 +539,38 @@ fi
 if [[ "${ZFSRECVD_GC_GRACE_DAYS:-}" =~ ^[0-9]+$ ]]; then
     gcenv+=" ZFSRECVD_GC_GRACE_DAYS=${ZFSRECVD_GC_GRACE_DAYS}"
 fi
+gc_json=""
 for h in "${fleet_receivers[@]}"; do
     if [[ -n "${prov_failed[$h]:-}" ]]; then
         continue
     fi
     echo "gc: [$h]" >&2
-    fleet_ssh "$(fleet_ssh_dest "$h")" \
+    # stdout is harvested into the run record (report.sh renders it) and
+    # re-echoed verbatim -- the console keeps every line in every mode
+    gout=""
+    if ! gout=$(fleet_ssh "$(fleet_ssh_dest "$h")" \
         "sudo -n env ZFSRECVD_CONF=$RUN_REMOTE_BASE/$h/run.conf$gcenv /etc/zfsrecvd/gc.sh" \
-        </dev/null >&2 \
-        || echo "WARNING: gc pass failed on [$h]" >&2
+        </dev/null); then
+        echo "WARNING: gc pass failed on [$h]" >&2
+    fi
+    if [[ -n "$gout" ]]; then
+        printf '%s\n' "$gout" >&2
+        while IFS= read -r gl; do
+            gl="${gl#GC:   }"
+            if [[ -z "$gl" ]]; then
+                continue
+            fi
+            # receiver-side dataset names were never charset-validated
+            # (foreign junk is exactly what GC reports on) -- escape
+            gl="${gl//\\/\\\\}"
+            gl="${gl//\"/\\\"}"
+            gc_json="${gc_json}${gc_json:+,}{\"id\":\"$h\",\"gc\":\"$gl\"}"
+        done <<<"$gout"
+    fi
 done
 
 #
-# ---------- run report v1 (PROTOCOL.md §22): net / pruned / avail ------------
+# ---------- run report (PROTOCOL.md §22): sample space, append runs.jsonl ----
 #
 report_json=""
 for h in "${fleet_receivers[@]}"; do
@@ -566,10 +585,8 @@ for h in "${fleet_receivers[@]}"; do
     r_pruned=$(sed -n '3,$p' <<<"$vals" | awk '{s+=$1} END{printf "%d", s+0}')
     r_before="${rused_before[$h]:-}"
     if [[ "$r_used" =~ ^[0-9]+$ && "$r_before" =~ ^[0-9]+$ ]]; then
-        r_net=$(( r_used - r_before ))
-        r_sign=""
-        (( r_net >= 0 )) && r_sign="+"
-        echo "report: [$h] net ${r_sign}$(numfmt --to=iec -- "$r_net" 2>/dev/null || echo "$r_net")B, pruned $(numfmt --to=iec -- "$r_pruned" 2>/dev/null || echo "$r_pruned")B, avail $(numfmt --to=iec -- "${r_avail:-0}" 2>/dev/null || echo "$r_avail")B" >&2
+        # numbers land in the jsonl record only; report.sh renders them
+        # (owner 2026-07-30: the console report: lines were redundant)
         report_json="${report_json}${report_json:+,}{\"id\":\"$h\",\"before\":$r_before,\"after\":$r_used,\"avail\":${r_avail:-0},\"pruned\":$r_pruned}"
         # ZFSRECVD_SHOW_PRUNES=1: name every snapshot this run destroyed
         # on the receiver (owner: watch the thinning while trust in it
@@ -577,7 +594,7 @@ for h in "${fleet_receivers[@]}"; do
         if [[ -n "${ZFSRECVD_SHOW_PRUNES:-}" ]]; then
             fleet_ssh "$(fleet_ssh_dest "$h")" \
                 "sudo -n cat $RUN_REMOTE_BASE/$h/pruned.list 2>/dev/null || true" \
-                </dev/null 2>/dev/null | sed 's/^/  pruned: /' >&2 || true
+                </dev/null 2>/dev/null | sed "s/^/  pruned: [$h] /" >&2 || true
         fi
     else
         echo "report: [$h] space accounting unavailable this run" >&2
@@ -600,7 +617,6 @@ for h in "${fleet_sources[@]}"; do
         s_used=$(sed -n 1p <<<"$vals")
         s_avail=$(sed -n 2p <<<"$vals")
         if [[ "$s_used" =~ ^[0-9]+$ ]]; then
-            echo "report: [$h] $s_tree used $(numfmt --to=iec -- "$s_used" 2>/dev/null || echo "$s_used")B, avail $(numfmt --to=iec -- "${s_avail:-0}" 2>/dev/null || echo "$s_avail")B" >&2
             src_json="${src_json}${src_json:+,}{\"id\":\"$h\",\"tree\":\"$s_tree\",\"used\":$s_used,\"avail\":${s_avail:-0}}"
         fi
     done
@@ -614,8 +630,8 @@ if [[ -n "$report_json" ]]; then
         mkdir -p "$report_dir" 2>/dev/null || report_dir=""
     fi
     if [[ -n "$report_dir" ]]; then
-        printf '{"ts":"%s","kind":"run","run":"%s","rc":%s,"recv":[%s],"src":[%s]}\n' \
-            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$run_id" "$orch_rc" "$report_json" "$src_json" \
+        printf '{"ts":"%s","kind":"run","run":"%s","rc":%s,"recv":[%s],"src":[%s],"gc":[%s]}\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$run_id" "$orch_rc" "$report_json" "$src_json" "$gc_json" \
             >> "$report_dir/runs.jsonl" 2>/dev/null || true
     fi
 fi

@@ -237,12 +237,17 @@ grep -q "gc: \[vmrecv\]" /tmp/fleet8.log && ok "T12 gc stage ran" || { bad "T12 
 RJ="${XDG_STATE_HOME:-$HOME/.local/state}/zfsrecvd/runs.jsonl"
 check "T12 runs.jsonl written" test -s "$RJ"
 grep -q '"state":"done","rc":"0"' "$RJ" && ok "T12 jsonl records ok jobs" || { bad "T12 jsonl content"; tail -n 3 "$RJ"; }
-grep -q "report: \[vmrecv\] net" /tmp/fleet8.log && ok "T12 run report line" || { bad "T12 report"; grep -a "report:" /tmp/fleet8.log; }
+grep -qF '{"id":"vmrecv","before":' "$RJ" && ok "T12 jsonl recv space data" || { bad "T12 recv data"; tail -n 2 "$RJ"; }
+grep -q "report: \[vmrecv\] net" /tmp/fleet8.log && bad "T12 console report lines still print" || ok "T12 console report lines gone"
 grep -q "\"kind\":\"run\"" "$RJ" && ok "T12 jsonl run record" || { bad "T12 run record"; tail -n 2 "$RJ"; }
 grep -q "GC:   all quiet:" /tmp/fleet8.log && ok "T12 gc all-quiet rollup" || { bad "T12 rollup"; grep -a "GC:" /tmp/fleet8.log | head -n 5; }
-grep -q "report: \[$CN\] ztest/src used" /tmp/fleet8.log && ok "T12 source space line" || { bad "T12 src space"; grep -a "report:" /tmp/fleet8.log; }
-/etc/zfsrecvd/report.sh 2>/dev/null | grep -q "last run: run-" && ok "T12 report.sh renders" || { bad "T12 report.sh"; /etc/zfsrecvd/report.sh 2>&1 | head -n 5; }
-grep -q "pruned: .*@zfsrecvd-2026-07-28-0800Z" /tmp/fleet8.log && ok "T12 SHOW_PRUNES names the destroyed" || { bad "T12 show prunes"; grep -a "pruned:" /tmp/fleet8.log | head -n 5; }
+grep -qF '","gc":"' "$RJ" && ok "T12 gc harvested into jsonl" || { bad "T12 gc jsonl"; tail -n 1 "$RJ"; }
+grep -qF "{\"id\":\"$CN\",\"tree\":\"ztest/src\"" "$RJ" && ok "T12 jsonl source space data" || { bad "T12 src data"; tail -n 1 "$RJ"; }
+rout=$(/etc/zfsrecvd/report.sh 2>/dev/null)
+grep -q "last run: run-" <<<"$rout" && ok "T12 report.sh renders" || { bad "T12 report.sh"; /etc/zfsrecvd/report.sh 2>&1 | head -n 5; }
+grep -qE "^  receiver +net +pruned +avail$" <<<"$rout" && ok "T12 report.sh receiver table" || { bad "T12 recv table"; echo "$rout" | head -n 12; }
+grep -q "  gc \[" <<<"$rout" && ok "T12 report.sh gc section" || { bad "T12 gc section"; echo "$rout" | head -n 20; }
+grep -q "pruned: \[vmrecv\] .*@zfsrecvd-2026-07-28-0800Z" /tmp/fleet8.log && ok "T12 SHOW_PRUNES names the destroyed" || { bad "T12 show prunes"; grep -a "pruned:" /tmp/fleet8.log | head -n 5; }
 
 echo "=== T13: replication cursors: exactly one per (dataset, dest) ==="
 n_c1=$(sudo zfs list -H -t bookmark -d 1 -o name ztest/src | grep -c '#zfsrecvd-vmrecv-')
