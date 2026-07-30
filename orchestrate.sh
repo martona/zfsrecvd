@@ -443,7 +443,8 @@ for key in "${pp_keys[@]}"; do
     # whatever captures the run -- a cron unit's journal, a redirect --
     # has them. Live board: the screen stays clean and the lines go
     # nowhere; the result is inspectable on the source itself.
-    if [[ -n "$QUIET" ]]; then
+    # ZFSRECVD_SHOW_PRUNES=1 promotes them to the board runs too.
+    if [[ -n "$QUIET" && -z "${ZFSRECVD_SHOW_PRUNES:-}" ]]; then
         ssh "${ssh_opts[@]}" "${J_SSH[i]}" \
             "sudo -n env ZFSRECVD_CONF=${J_RCONF[i]} /etc/zfsrecvd/sendtree.sh --prune-only ${J_TREE[i]}" \
             </dev/null >/dev/null 2>&1 \

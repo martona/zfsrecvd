@@ -18,6 +18,7 @@ cp "$SCRIPT_DIR/send.sh"          /etc/zfsrecvd/
 cp "$SCRIPT_DIR/listen.sh"        /etc/zfsrecvd/
 cp "$SCRIPT_DIR/zfsrecvd.sh"      /etc/zfsrecvd/
 cp "$SCRIPT_DIR/run_indented.sh"  /etc/zfsrecvd/
+cp "$SCRIPT_DIR/unlock-replica.sh" /etc/zfsrecvd/
 cp "$SCRIPT_DIR/zfsrecvd.service" /etc/systemd/system/zfsrecvd.service
 systemctl daemon-reload 2>/dev/null || true
 

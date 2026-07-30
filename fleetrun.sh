@@ -54,6 +54,7 @@ FLEET_SCRIPTS=(
     run_indented.sh
     send.sh
     sendtree.sh
+    unlock-replica.sh
     zfsrecvd.sh
 )
 check_only=""
@@ -559,6 +560,14 @@ for h in "${fleet_receivers[@]}"; do
         (( r_net >= 0 )) && r_sign="+"
         echo "report: [$h] net ${r_sign}$(numfmt --to=iec -- "$r_net" 2>/dev/null || echo "$r_net")B, pruned $(numfmt --to=iec -- "$r_pruned" 2>/dev/null || echo "$r_pruned")B, avail $(numfmt --to=iec -- "${r_avail:-0}" 2>/dev/null || echo "$r_avail")B" >&2
         report_json="${report_json}${report_json:+,}{\"id\":\"$h\",\"before\":$r_before,\"after\":$r_used,\"avail\":${r_avail:-0},\"pruned\":$r_pruned}"
+        # ZFSRECVD_SHOW_PRUNES=1: name every snapshot this run destroyed
+        # on the receiver (owner: watch the thinning while trust in it
+        # builds). The ledger exists regardless; only display is gated.
+        if [[ -n "${ZFSRECVD_SHOW_PRUNES:-}" ]]; then
+            fleet_ssh "$(fleet_ssh_dest "$h")" \
+                "sudo -n cat $RUN_REMOTE_BASE/$h/pruned.list 2>/dev/null || true" \
+                </dev/null 2>/dev/null | sed 's/^/  pruned: /' >&2 || true
+        fi
     else
         echo "report: [$h] space accounting unavailable this run" >&2
     fi

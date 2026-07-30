@@ -314,6 +314,9 @@ prune_tree() {
                 if zfs destroy "${ds}@${name}" 2>/dev/null; then
                     pruned=$(( pruned + 1 ))
                     freed=$(( freed + b ))
+                    if [[ "$cert_dir" != "/etc/zfsrecvd" ]]; then
+                        echo "${ds}@${name}" >> "${cert_dir}/pruned.list" 2>/dev/null || true
+                    fi
                 else
                     log "WARNING: failed to prune ${ds}@${name}"
                 fi
@@ -327,6 +330,9 @@ prune_tree() {
                 if zfs destroy "${list[i]}" 2>/dev/null; then
                     pruned=$(( pruned + 1 ))
                     freed=$(( freed + b ))
+                    if [[ "$cert_dir" != "/etc/zfsrecvd" ]]; then
+                        echo "${list[i]}" >> "${cert_dir}/pruned.list" 2>/dev/null || true
+                    fi
                 else
                     log "WARNING: failed to prune ${list[i]}"
                 fi

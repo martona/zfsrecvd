@@ -48,6 +48,7 @@ scripts=(
     run_indented.sh
     send.sh
     sendtree.sh
+    unlock-replica.sh
     zfsrecvd.sh
 )
 

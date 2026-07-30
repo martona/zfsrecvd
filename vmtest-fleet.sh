@@ -223,7 +223,7 @@ sudo zfs snapshot "$DEST@zfsrecvd-2026-07-28-0900Z"
 sudo zfs snapshot "$DEST@keepme-manual"
 sed 's/^destination.*/destination   hourly=1/' ~/fleet-test.conf > ~/fleet-grid.conf
 pre=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST" | grep -c zfsrecvd-)
-/etc/zfsrecvd/fleetrun.sh -c ~/fleet-grid.conf >/tmp/fleet8.log 2>&1
+ZFSRECVD_SHOW_PRUNES=1 /etc/zfsrecvd/fleetrun.sh -c ~/fleet-grid.conf >/tmp/fleet8.log 2>&1
 rc=$?
 check "T12 rc=0" test "$rc" -eq 0
 grep -q "0 failed" /tmp/fleet8.log && ok "T12 clean" || { bad "T12 failures"; tail -n 30 /tmp/fleet8.log; }
@@ -240,6 +240,7 @@ grep -q '"state":"done","rc":"0"' "$RJ" && ok "T12 jsonl records ok jobs" || { b
 grep -q "report: \[vmrecv\] net" /tmp/fleet8.log && ok "T12 run report line" || { bad "T12 report"; grep -a "report:" /tmp/fleet8.log; }
 grep -q "\"kind\":\"run\"" "$RJ" && ok "T12 jsonl run record" || { bad "T12 run record"; tail -n 2 "$RJ"; }
 grep -q "datasets, newest recv" /tmp/fleet8.log && ok "T12 gc client summary" || { bad "T12 client summary"; grep -a "GC:" /tmp/fleet8.log | head -n 5; }
+grep -q "pruned: .*@zfsrecvd-2026-07-28-0800Z" /tmp/fleet8.log && ok "T12 SHOW_PRUNES names the destroyed" || { bad "T12 show prunes"; grep -a "pruned:" /tmp/fleet8.log | head -n 5; }
 
 echo "=== T13: replication cursors: exactly one per (dataset, dest) ==="
 n_c1=$(sudo zfs list -H -t bookmark -d 1 -o name ztest/src | grep -c '#zfsrecvd-vmrecv-')
