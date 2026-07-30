@@ -505,9 +505,16 @@ fi
 if [[ -n "$report_dir" ]]; then
     report_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     for (( i = 0; i < njobs; i++ )); do
-        printf '{"ts":"%s","snap":"%s","src":"%s","tree":"%s","dst":"%s","state":"%s","rc":"%s","why":"%s","secs":%s}\n' \
+        # failed-dataset drilldown: harvested from the job log when one
+        # exists (live board keeps logs of failing jobs); headless runs
+        # leave the FAILED-DATASETS line in the journal instead.
+        fdl=""
+        if [[ -n "$logdir" && -f "$(job_log "$i")" ]]; then
+            fdl=$(grep -a "FAILED-DATASETS:" "$(job_log "$i")" 2>/dev/null | tail -n 1 | sed -e 's/\r$//' -e 's/.*FAILED-DATASETS: //') || fdl=""
+        fi
+        printf '{"ts":"%s","snap":"%s","src":"%s","tree":"%s","dst":"%s","state":"%s","rc":"%s","why":"%s","failed_ds":"%s","secs":%s}\n' \
             "$report_ts" "$snap" "${J_SRC[i]}" "${J_TREE[i]}" "${J_DST[i]}" \
-            "${J_STATE[i]}" "${J_RC[i]:-}" "${J_WHY[i]:-}" "${J_SECS[i]:-0}"
+            "${J_STATE[i]}" "${J_RC[i]:-}" "${J_WHY[i]:-}" "$fdl" "${J_SECS[i]:-0}"
     done >> "$report_dir/runs.jsonl" 2>/dev/null || true
 fi
 

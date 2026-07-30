@@ -12,6 +12,7 @@ cp "$SCRIPT_DIR/fleetrun.sh"      /etc/zfsrecvd/
 cp "$SCRIPT_DIR/gc.sh"            /etc/zfsrecvd/
 cp "$SCRIPT_DIR/orchestrate.sh"   /etc/zfsrecvd/
 cp "$SCRIPT_DIR/pp2.sh"           /etc/zfsrecvd/
+cp "$SCRIPT_DIR/report.sh"        /etc/zfsrecvd/
 cp "$SCRIPT_DIR/retain.sh"        /etc/zfsrecvd/
 cp "$SCRIPT_DIR/sendtree.sh"      /etc/zfsrecvd/
 cp "$SCRIPT_DIR/send.sh"          /etc/zfsrecvd/

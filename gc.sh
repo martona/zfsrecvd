@@ -33,6 +33,8 @@ GRACE_DAYS="${ZFSRECVD_GC_GRACE_DAYS:-90}"  # observation -> eligible
 
 now=$(date -u +%s)
 say() { echo "GC:   $*"; }
+quiet_cns=0
+quiet_ds=0
 
 while IFS= read -r cnroot; do
     [[ "$cnroot" != "$recv_root" ]] || continue
@@ -111,9 +113,21 @@ while IFS= read -r cnroot; do
             say "$ds: recovered -- receiving again; orphan clock cleared"
         fi
     done
-    # client summary (owner report wishlist): one line per CN, always
-    say "$cnroot: ${#dss[@]} datasets, newest recv $(( (now - newest) / 86400 ))d ago, ${n_cand} orphan candidate(s), ${n_unst} unstamped"
+    # client summary: per-CN line only when there is something to say
+    # (owner: all-zero lines "elevate to noise"); healthy CNs roll up
+    # into one all-quiet line at the end.
+    age=$(( (now - newest) / 86400 ))
+    if (( n_cand > 0 || n_unst > 0 || age >= 1 )); then
+        say "$cnroot: ${#dss[@]} datasets, newest recv ${age}d ago, ${n_cand} orphan candidate(s), ${n_unst} unstamped"
+    else
+        quiet_cns=$(( quiet_cns + 1 ))
+        quiet_ds=$(( quiet_ds + ${#dss[@]} ))
+    fi
     unset lr osince _seen
 done < <(zfs list -H -d 1 -t filesystem -o name "$recv_root" 2>/dev/null || true)
+
+if (( quiet_cns > 0 )); then
+    say "all quiet: $quiet_cns client(s), $quiet_ds datasets, everything fresh"
+fi
 
 exit 0

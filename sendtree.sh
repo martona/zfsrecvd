@@ -764,5 +764,8 @@ echo "Tree [$root@$target]${dest_tag}: $sent_n sent, $utd_n up to date, $skip_n 
 if [[ ${#failed[@]} -gt 0 ]]; then
     echo "Failed datasets for [$remote]:" >&2
     printf '  %s\n' "${failed[@]}" >&2
+    # machine-readable single line for the run report (names only, the
+    # human list above carries the reasons)
+    echo "FAILED-DATASETS: $(printf '%s\n' "${failed[@]}" | awk '{printf "%s%s", (NR>1?" ":""), $1}')" >&2
     exit 2
 fi

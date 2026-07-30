@@ -44,6 +44,7 @@ scripts=(
     listen.sh
     orchestrate.sh
     pp2.sh
+    report.sh
     retain.sh
     run_indented.sh
     send.sh

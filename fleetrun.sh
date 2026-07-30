@@ -50,6 +50,7 @@ FLEET_SCRIPTS=(
     listen.sh
     orchestrate.sh
     pp2.sh
+    report.sh
     retain.sh
     run_indented.sh
     send.sh
@@ -582,6 +583,30 @@ for h in "${fleet_receivers[@]}"; do
         echo "report: [$h] space accounting unavailable this run" >&2
     fi
 done
+# source-side space (owner wishlist): tree used + pool avail per source
+src_json=""
+for h in "${fleet_sources[@]}"; do
+    if [[ -n "${prov_failed[$h]:-}" ]]; then
+        continue
+    fi
+    declare -A sseen=()
+    for (( i = 0; i < ${#fleet_job_src[@]}; i++ )); do
+        if [[ "${fleet_job_src[i]}" != "$h" || -n "${sseen[${fleet_job_tree[i]}]:-}" ]]; then
+            continue
+        fi
+        sseen[${fleet_job_tree[i]}]=1
+        s_tree="${fleet_job_tree[i]}"
+        vals=$(fleet_ssh "$(fleet_ssh_dest "$h")" "zfs get -Hp -o value used,avail $s_tree" </dev/null 2>/dev/null) || vals=""
+        s_used=$(sed -n 1p <<<"$vals")
+        s_avail=$(sed -n 2p <<<"$vals")
+        if [[ "$s_used" =~ ^[0-9]+$ ]]; then
+            echo "report: [$h] $s_tree used $(numfmt --to=iec -- "$s_used" 2>/dev/null || echo "$s_used")B, avail $(numfmt --to=iec -- "${s_avail:-0}" 2>/dev/null || echo "$s_avail")B" >&2
+            src_json="${src_json}${src_json:+,}{\"id\":\"$h\",\"tree\":\"$s_tree\",\"used\":$s_used,\"avail\":${s_avail:-0}}"
+        fi
+    done
+    unset sseen
+done
+
 if [[ -n "$report_json" ]]; then
     report_dir="/var/log/zfsrecvd"
     if ! mkdir -p "$report_dir" 2>/dev/null || [[ ! -w "$report_dir" ]]; then
@@ -589,8 +614,8 @@ if [[ -n "$report_json" ]]; then
         mkdir -p "$report_dir" 2>/dev/null || report_dir=""
     fi
     if [[ -n "$report_dir" ]]; then
-        printf '{"ts":"%s","kind":"run","run":"%s","rc":%s,"recv":[%s]}\n' \
-            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$run_id" "$orch_rc" "$report_json" \
+        printf '{"ts":"%s","kind":"run","run":"%s","rc":%s,"recv":[%s],"src":[%s]}\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$run_id" "$orch_rc" "$report_json" "$src_json" \
             >> "$report_dir/runs.jsonl" 2>/dev/null || true
     fi
 fi

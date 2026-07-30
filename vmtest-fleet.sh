@@ -239,7 +239,9 @@ check "T12 runs.jsonl written" test -s "$RJ"
 grep -q '"state":"done","rc":"0"' "$RJ" && ok "T12 jsonl records ok jobs" || { bad "T12 jsonl content"; tail -n 3 "$RJ"; }
 grep -q "report: \[vmrecv\] net" /tmp/fleet8.log && ok "T12 run report line" || { bad "T12 report"; grep -a "report:" /tmp/fleet8.log; }
 grep -q "\"kind\":\"run\"" "$RJ" && ok "T12 jsonl run record" || { bad "T12 run record"; tail -n 2 "$RJ"; }
-grep -q "datasets, newest recv" /tmp/fleet8.log && ok "T12 gc client summary" || { bad "T12 client summary"; grep -a "GC:" /tmp/fleet8.log | head -n 5; }
+grep -q "GC:   all quiet:" /tmp/fleet8.log && ok "T12 gc all-quiet rollup" || { bad "T12 rollup"; grep -a "GC:" /tmp/fleet8.log | head -n 5; }
+grep -q "report: \[$CN\] ztest/src used" /tmp/fleet8.log && ok "T12 source space line" || { bad "T12 src space"; grep -a "report:" /tmp/fleet8.log; }
+/etc/zfsrecvd/report.sh 2>/dev/null | grep -q "last run: run-" && ok "T12 report.sh renders" || { bad "T12 report.sh"; /etc/zfsrecvd/report.sh 2>&1 | head -n 5; }
 grep -q "pruned: .*@zfsrecvd-2026-07-28-0800Z" /tmp/fleet8.log && ok "T12 SHOW_PRUNES names the destroyed" || { bad "T12 show prunes"; grep -a "pruned:" /tmp/fleet8.log | head -n 5; }
 
 echo "=== T13: replication cursors: exactly one per (dataset, dest) ==="
@@ -278,6 +280,7 @@ osv=$(sudo zfs get -H -o value zfsrecvd:orphan-since ztest/recv/$CN/stale)
 check "T15 orphan-since stamped (got $osv)" test "$osv" != "-"
 out2=$(sudo env ZFSRECVD_CONF=/etc/zfsrecvd/zfsrecvd.conf /etc/zfsrecvd/gc.sh 2>&1)
 grep -q "eligible in" <<<"$out2" && ok "T15 countdown on second pass" || { bad "T15 countdown"; echo "$out2"; }
+grep -q "datasets, newest recv" <<<"$out2" && ok "T15 noisy CN gets its summary line" || { bad "T15 summary"; echo "$out2"; }
 out3=$(sudo env ZFSRECVD_GC_GRACE_DAYS=0 ZFSRECVD_CONF=/etc/zfsrecvd/zfsrecvd.conf /etc/zfsrecvd/gc.sh 2>&1)
 grep -q "stale: RECLAIM-ELIGIBLE" <<<"$out3" && ok "T15 grace knob turns down" || { bad "T15 knob"; echo "$out3"; }
 check "T15 nothing destroyed" sudo zfs list -H ztest/recv/$CN/oldcrap ztest/recv/$CN/stale
