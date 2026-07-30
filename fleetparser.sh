@@ -11,7 +11,7 @@
 # Globals:
 #   fleet_opt_user fleet_opt_port fleet_opt_workers fleet_opt_transport   [options] w/ defaults
 #   fleet_ret_source fleet_ret_destination     raw bucket strings, reserved for D
-#   fleet_host_ssh[] _data[] _recv[] _ec2[] _bind[]     assoc by identity, sparse
+#   fleet_host_ssh[] _data[] _recv[] _ec2[] _bind[] _cadence[]   assoc by identity, sparse
 #   fleet_job_src[] fleet_job_tree[] fleet_job_dest[]   parallel arrays, one row per job
 #   fleet_sources[] fleet_receivers[] fleet_participants[]   derived, deduped,
 #                                                            first-seen order
@@ -29,7 +29,7 @@ fleet_opt_workers=""
 fleet_opt_transport=""
 fleet_ret_source=""
 fleet_ret_destination=""
-declare -A fleet_host_ssh fleet_host_data fleet_host_recv fleet_host_ec2 fleet_host_bind
+declare -A fleet_host_ssh fleet_host_data fleet_host_recv fleet_host_ec2 fleet_host_bind fleet_host_cadence
 declare -A _fleet_host_seen _fleet_job_seen
 fleet_job_src=()
 fleet_job_tree=()
@@ -103,6 +103,9 @@ _fleet_host_line() {
                   fleet_host_recv[$id]="$v" ;;
             ec2)  fleet_host_ec2[$id]="$v" ;;
             bind) fleet_host_bind[$id]="$v" ;;
+            cadence) [[ "$v" =~ ^[0-9]+[mhd]$ ]] \
+                      || _fleet_fatal "bad cadence '$v' (want <N>m|<N>h|<N>d, e.g. 24h)"
+                  fleet_host_cadence[$id]="$v" ;;
             *)    _fleet_fatal "unknown host attribute '$k'" ;;
         esac
     done
@@ -165,16 +168,30 @@ fleet_parse() {
     [[ -z "$fleet_opt_workers" ]] && fleet_opt_workers=8
     [[ -z "$fleet_opt_transport" ]] && fleet_opt_transport="socat"
     (( ${#fleet_job_src[@]} > 0 )) || _fleet_fatal "no [jobs] defined"
-    local i s d
-    declare -A _seen_src=() _seen_recv=() _seen_part=()
+    local i d
     for (( i = 0; i < ${#fleet_job_src[@]}; i++ )); do
-        s="${fleet_job_src[i]}"
         d="${fleet_job_dest[i]}"
         # Sources without a [hosts] entry are legal (vanilla senders), so a
         # source typo can't be caught here; a dest typo always can, because
         # every dest must be declared with recv=.
         [[ -n "${fleet_host_recv[$d]:-}" ]] \
             || _fleet_fatal "dest '$d' has no recv= ([hosts] entry missing, or a typo in a job row)"
+    done
+    fleet_derive
+}
+
+# (Re)compute the derived host sets from the job arrays. fleet_parse calls
+# it once; fleetrun calls it AGAIN after the cadence filter trims the job
+# arrays, so participants/receivers/wake sets reflect what actually runs.
+fleet_derive() {
+    fleet_sources=()
+    fleet_receivers=()
+    fleet_participants=()
+    local i s d
+    declare -A _seen_src=() _seen_recv=() _seen_part=()
+    for (( i = 0; i < ${#fleet_job_src[@]}; i++ )); do
+        s="${fleet_job_src[i]}"
+        d="${fleet_job_dest[i]}"
         if [[ -z "${_seen_src[$s]:-}" ]]; then
             _seen_src[$s]=1
             fleet_sources+=( "$s" )
@@ -205,6 +222,21 @@ fleet_ssh_dest() {
 
 fleet_data() {
     printf '%s\n' "${fleet_host_data[$1]:-$1}"
+}
+
+# fleet_cadence_secs <id> -> cadence in seconds, or "" when unset.
+fleet_cadence_secs() {
+    local v="${fleet_host_cadence[$1]:-}" n
+    if [[ -z "$v" ]]; then
+        printf '\n'
+        return 0
+    fi
+    n="${v%?}"
+    case "$v" in
+        *m) printf '%s\n' $(( n * 60 )) ;;
+        *h) printf '%s\n' $(( n * 3600 )) ;;
+        *d) printf '%s\n' $(( n * 86400 )) ;;
+    esac
 }
 
 # fleet_ret_bucket <raw scope string> <bucket> -> count, or "" if absent.

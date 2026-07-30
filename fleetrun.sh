@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # The Final Shape driver: one run of the whole fleet from one config.
 #
-#   fleetrun.sh [-c fleet.conf] [--check] [--keep] [-- orchestrate args]
+#   fleetrun.sh [-c fleet.conf] [--check] [--keep] [--force-ec2] [-- orchestrate args]
 #
 # Reads fleet.conf (see fleetparser.sh / PROTOCOL.md §18), then:
+#   0. drops jobs whose (source, tree, dest) succeeded within the dest's
+#      cadence= window (--force-ec2 overrides); a destination whose jobs
+#      all dropped is left alone entirely -- EC2 stays asleep,
 #   1. wakes any EC2 hosts participating in this run,
 #   2. mints a per-run CA and per-host certs (keys are generated ON the
 #      hosts and never transit; validity is a constant 365 days -- the
@@ -60,14 +63,16 @@ FLEET_SCRIPTS=(
 )
 check_only=""
 keep_rundir=""
+force_ec2=""
 orch_args=()
 while (( $# > 0 )); do
     case "$1" in
         -c|--config) FLEET_CONF="$2"; shift 2 ;;
         --check)     check_only=1; shift ;;
         --keep)      keep_rundir=1; shift ;;
+        --force-ec2) force_ec2=1; shift ;;
         --)          shift; orch_args=( "$@" ); break ;;
-        *)           echo "Usage: $0 [-c fleet.conf] [--check] [--keep] [-- orchestrate args]" >&2
+        *)           echo "Usage: $0 [-c fleet.conf] [--check] [--keep] [--force-ec2] [-- orchestrate args]" >&2
                      exit 64 ;;
     esac
 done
@@ -80,6 +85,125 @@ for f in "${FLEET_SCRIPTS[@]}"; do
         exit 1
     fi
 done
+
+run_id="run-$(date -u +%Y%m%d-%H%M%S)"
+
+report_dir=""
+report_dir_resolve() {
+    report_dir="/var/log/zfsrecvd"
+    if ! mkdir -p "$report_dir" 2>/dev/null || [[ ! -w "$report_dir" ]]; then
+        report_dir="${XDG_STATE_HOME:-$HOME/.local/state}/zfsrecvd"
+        mkdir -p "$report_dir" 2>/dev/null || report_dir=""
+    fi
+}
+
+append_cadence_jobs() {
+    # one per-job line per cadence-dropped job, state "cadence" -- skips
+    # are visible in the report (owner ask), never counted as failures
+    local i ts
+    if (( ${#cad_src[@]} == 0 )) || [[ -z "$report_dir" ]]; then
+        return 0
+    fi
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    for (( i = 0; i < ${#cad_src[@]}; i++ )); do
+        printf '{"ts":"%s","snap":"","src":"%s","tree":"%s","dst":"%s","state":"cadence","rc":"0","why":"last ok %s (cadence %s)","failed_ds":"","secs":0}\n' \
+            "$ts" "${cad_src[i]}" "${cad_tree[i]}" "${cad_dest[i]}" \
+            "${cad_ok[i]}" "${fleet_host_cadence[${cad_dest[i]}]}"
+    done >> "$report_dir/runs.jsonl" 2>/dev/null || true
+}
+
+#
+# ---------- 0. cadence filter (PROTOCOL.md §22) ------------------------------
+#
+# A destination carrying cadence=<N>[mhd] receives only when its last
+# success is older than the window, judged per (source, tree, dest) job
+# tuple against the runs.jsonl ledger. Filtering happens BEFORE the
+# wake-set/participant derivation, so a fully-fresh EC2 destination is
+# never even woken. ISO-8601 UTC timestamps compare as plain strings --
+# no date parsing, no mktime (mawk-safe by construction).
+cad_src=(); cad_tree=(); cad_dest=(); cad_ok=()
+declare -A cad_n=() cad_newest=()
+has_cadence=""
+for h in "${fleet_receivers[@]}"; do
+    if [[ -n "${fleet_host_cadence[$h]:-}" ]]; then
+        has_cadence=1
+    fi
+done
+if [[ -n "$has_cadence" && -n "$force_ec2" ]]; then
+    echo "cadence: overridden by --force-ec2; every job runs" >&2
+fi
+if [[ -n "$has_cadence" && -z "$force_ec2" ]]; then
+    ledger="/var/log/zfsrecvd/runs.jsonl"
+    [[ -s "$ledger" ]] || ledger="${XDG_STATE_HOME:-$HOME/.local/state}/zfsrecvd/runs.jsonl"
+    declare -A last_ok=()
+    if [[ -s "$ledger" ]]; then
+        # newest done/rc=0 timestamp per job tuple, one awk pass; -F'"'
+        # puts each key at $i and its value at $(i+2) in our own format
+        while IFS=$'\t' read -r k v; do
+            last_ok[$k]="$v"
+        done < <(awk -F'"' '
+            /"state":"done"/ && /"rc":"0"/ {
+                ts = ""; src = ""; tree = ""; dst = ""
+                for (i = 1; i < NF; i++) {
+                    if ($i == "ts")   ts   = $(i + 2)
+                    if ($i == "src")  src  = $(i + 2)
+                    if ($i == "tree") tree = $(i + 2)
+                    if ($i == "dst")  dst  = $(i + 2)
+                }
+                if (ts != "" && src != "" && dst != "") {
+                    k = src "|" tree "|" dst
+                    if (ts > best[k]) best[k] = ts
+                }
+            }
+            END { for (k in best) printf "%s\t%s\n", k, best[k] }
+        ' "$ledger")
+    fi
+    _pre_recv=( "${fleet_receivers[@]}" )
+    _keep_src=(); _keep_tree=(); _keep_dest=()
+    for (( i = 0; i < ${#fleet_job_src[@]}; i++ )); do
+        d="${fleet_job_dest[i]}"
+        csec=$(fleet_cadence_secs "$d")
+        drop=""
+        if [[ -n "$csec" ]]; then
+            cutoff=$(date -u -d "-${csec} seconds" +%Y-%m-%dT%H:%M:%SZ)
+            lok="${last_ok[${fleet_job_src[i]}|${fleet_job_tree[i]}|$d]:-}"
+            if [[ -n "$lok" && ! "$lok" < "$cutoff" ]]; then
+                drop=1
+                cad_src+=( "${fleet_job_src[i]}" )
+                cad_tree+=( "${fleet_job_tree[i]}" )
+                cad_dest+=( "$d" )
+                cad_ok+=( "$lok" )
+                cad_n[$d]=$(( ${cad_n[$d]:-0} + 1 ))
+                if [[ "$lok" > "${cad_newest[$d]:-}" ]]; then
+                    cad_newest[$d]="$lok"
+                fi
+            fi
+        fi
+        if [[ -z "$drop" ]]; then
+            _keep_src+=( "${fleet_job_src[i]}" )
+            _keep_tree+=( "${fleet_job_tree[i]}" )
+            _keep_dest+=( "${fleet_job_dest[i]}" )
+        fi
+    done
+    if (( ${#cad_src[@]} > 0 )); then
+        fleet_job_src=( "${_keep_src[@]}" )
+        fleet_job_tree=( "${_keep_tree[@]}" )
+        fleet_job_dest=( "${_keep_dest[@]}" )
+        fleet_derive
+        declare -A _post_recv=()
+        for h in "${fleet_receivers[@]}"; do
+            _post_recv[$h]=1
+        done
+        for h in "${_pre_recv[@]}"; do
+            if [[ -n "${cad_n[$h]:-}" ]]; then
+                echo "cadence: [$h] ${cad_n[$h]} job(s) within ${fleet_host_cadence[$h]} (newest ok ${cad_newest[$h]}); skipping" >&2
+            fi
+            if [[ -n "${cad_n[$h]:-}" && -z "${_post_recv[$h]:-}" && -n "${fleet_host_ec2[$h]:-}" ]]; then
+                echo "cadence: [$h] EC2 wake skipped" >&2
+            fi
+        done
+    fi
+fi
 
 #
 # ---------- plan -------------------------------------------------------------
@@ -95,6 +219,9 @@ echo "fleet plan: ${#fleet_job_src[@]} jobs, sources: ${fleet_sources[*]}, recei
 if [[ ${#wake_ids[@]} -gt 0 ]]; then
     echo "fleet plan: EC2 wake set: ${wake_ids[*]}" >&2
 fi
+if (( ${#cad_src[@]} > 0 )); then
+    echo "fleet plan: ${#cad_src[@]} job(s) skipped by cadence" >&2
+fi
 if [[ "$fleet_opt_transport" == "haproxy" ]]; then
     echo "fleet plan: transport haproxy (PP2 identity)" >&2
 fi
@@ -106,6 +233,13 @@ if [[ -n "$check_only" ]]; then
             "${fleet_job_dest[local_i]}" "$(fleet_data "${fleet_job_dest[local_i]}")" >&2
         local_i=$(( local_i + 1 ))
     done
+    local_i=0
+    while (( local_i < ${#cad_src[@]} )); do
+        printf '  job: %s %s -> %s SKIPPED (within cadence, last ok %s)\n' \
+            "${cad_src[local_i]}" "${cad_tree[local_i]}" \
+            "${cad_dest[local_i]}" "${cad_ok[local_i]}" >&2
+        local_i=$(( local_i + 1 ))
+    done
     echo "fleet plan: OK (check only, nothing provisioned)" >&2
     exit 0
 fi
@@ -114,6 +248,22 @@ fi
 # orchestrate skips the lock via ZFSRECVD_SKIP_LOCK.
 orch_lock
 export ZFSRECVD_SKIP_LOCK=1
+
+if (( ${#fleet_job_src[@]} == 0 )); then
+    # every job policy-skipped: a successful no-op, not a degraded run.
+    # The jsonl still gets the cadence lines plus a bare run record so
+    # report.sh's positional grouping stays intact (job lines must never
+    # dangle without a following record).
+    echo "cadence: every job is within its destination's window; nothing to do" >&2
+    report_dir_resolve
+    append_cadence_jobs
+    if [[ -n "$report_dir" && ${#cad_src[@]} -gt 0 ]]; then
+        printf '{"ts":"%s","kind":"run","run":"%s","rc":0,"recv":[],"src":[],"gc":[]}\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$run_id" \
+            >> "$report_dir/runs.jsonl" 2>/dev/null || true
+    fi
+    exit 0
+fi
 
 rundir=$(mktemp -d /tmp/zfsrecvd-fleet.XXXXXX)
 provisioned=()
@@ -204,7 +354,6 @@ trap 'fleet_teardown; stop_ec2_instances' EXIT
 #
 # ---------- 2. mint the run CA -----------------------------------------------
 #
-run_id="run-$(date -u +%Y%m%d-%H%M%S)"
 openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
     -keyout "$rundir/ca.key" -out "$rundir/ca.pem" \
     -subj "/CN=zfsrecvd-$run_id-ca" 2>/dev/null
@@ -623,13 +772,10 @@ for h in "${fleet_sources[@]}"; do
     unset sseen
 done
 
-if [[ -n "$report_json" ]]; then
-    report_dir="/var/log/zfsrecvd"
-    if ! mkdir -p "$report_dir" 2>/dev/null || [[ ! -w "$report_dir" ]]; then
-        report_dir="${XDG_STATE_HOME:-$HOME/.local/state}/zfsrecvd"
-        mkdir -p "$report_dir" 2>/dev/null || report_dir=""
-    fi
+if [[ -n "$report_json" || ${#cad_src[@]} -gt 0 ]]; then
+    report_dir_resolve
     if [[ -n "$report_dir" ]]; then
+        append_cadence_jobs
         printf '{"ts":"%s","kind":"run","run":"%s","rc":%s,"recv":[%s],"src":[%s],"gc":[%s]}\n' \
             "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$run_id" "$orch_rc" "$report_json" "$src_json" "$gc_json" \
             >> "$report_dir/runs.jsonl" 2>/dev/null || true

@@ -23,7 +23,7 @@ destination   hourly=48 daily=30 weekly=8 monthly=12
 
 [hosts]
 bergamo         recv=tank/recv   data=bergamo.lan
-cp4             recv=tank/recv   data=commodoreplus4.lan   ec2=i-abc123
+cp4             recv=tank/recv   data=commodoreplus4.lan   ec2=i-abc123   cadence=24h
 zeus            ssh=root@zeus-mgmt   recv=rust/recv
 
 [jobs]
@@ -45,7 +45,8 @@ out=$(bash -c "source '$FP'; fleet_parse '$FX/good.conf';
     echo \"hourly_src=\$(fleet_ret_bucket \"\$fleet_ret_source\" hourly)\";
     echo \"monthly_dst=\$(fleet_ret_bucket \"\$fleet_ret_destination\" monthly)\";
     echo \"absent=[\$(fleet_ret_bucket \"\$fleet_ret_source\" monthly)]\";
-    echo \"ec2_cp4=\${fleet_host_ec2[cp4]}\"" 2>&1)
+    echo \"ec2_cp4=\${fleet_host_ec2[cp4]}\";
+    echo \"cad_cp4=\${fleet_host_cadence[cp4]} cadsec_cp4=\$(fleet_cadence_secs cp4) cadsec_none=[\$(fleet_cadence_secs bergamo)]\"" 2>&1)
 rc=$?
 [[ $rc -eq 0 ]] && ok "good.conf parses (rc=0)" || { bad "good.conf rc=$rc"; echo "$out"; }
 grep -q "user=marton port=15299 workers=8 transport=haproxy" <<<"$out" && ok "options + workers default + transport" || bad "options: $out"
@@ -59,6 +60,7 @@ grep -q "hourly_src=24" <<<"$out" && ok "ret bucket hourly/source" || bad "bucke
 grep -q "monthly_dst=12" <<<"$out" && ok "ret bucket monthly/dest" || bad "bucket: $out"
 grep -q "absent=\[\]" <<<"$out" && ok "ret bucket absent = empty" || bad "bucket absent: $out"
 grep -q "ec2_cp4=i-abc123" <<<"$out" && ok "ec2 attr" || bad "ec2: $out"
+grep -q "cad_cp4=24h cadsec_cp4=86400 cadsec_none=\[\]" <<<"$out" && ok "cadence attr + secs helper" || bad "cadence: $out"
 
 expect_fatal() { # name conf-body expected-line expected-msg-fragment
     local name="$1" body="$2" eline="$3" frag="$4"
@@ -121,6 +123,12 @@ b recv=t/r2' 3 "duplicate host"
 
 expect_fatal nojobs '[hosts]
 b recv=t/r' EOF "no \[jobs\]"
+
+expect_fatal badcadence '[hosts]
+b recv=t/r cadence=often' 2 "bad cadence"
+
+expect_fatal badcadence2 '[hosts]
+b recv=t/r cadence=24' 2 "bad cadence"
 
 echo "=== RESULT: $PASS passed, $FAIL failed ==="
 [[ $FAIL -eq 0 ]]

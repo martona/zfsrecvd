@@ -296,10 +296,53 @@ rc=$?
 check "T16 rc=0" test "$rc" -eq 0
 grep -q "eligible for reclaim in 0d" /tmp/fleet10.log && ok "T16 knobs reached the receiver" || { bad "T16 knobs"; grep -a "GC:" /tmp/fleet10.log | head -n 8; }
 
+echo "=== T17: ec2 cadence: fresh destinations skip; --force-ec2 overrides ==="
+# T16's run just succeeded for both receivers, so the ledger is fresh.
+# 24h cadence on vmrecv2: its one job must skip; vmrecv still runs, and
+# the skipped host is not provisioned at all (the EC2-wake-skip path is
+# the same structural exclusion; the rig has no ec2= host to prove it on).
+sed 's/^vmrecv2 /vmrecv2 cadence=24h /' ~/fleet-test.conf > ~/fleet-cad.conf
+/etc/zfsrecvd/fleetrun.sh -c ~/fleet-cad.conf >/tmp/fleet11.log 2>&1
+rc=$?
+check "T17 rc=0 (skip is not a failure)" test "$rc" -eq 0
+grep -q "cadence: \[vmrecv2\] 1 job(s) within 24h" /tmp/fleet11.log && ok "T17 skip announced" || { bad "T17 announce"; grep -a "cadence" /tmp/fleet11.log; }
+grep -q "starting run listener on \[vmrecv2\]" /tmp/fleet11.log && bad "T17 skipped host was provisioned" || ok "T17 skipped host left alone"
+grep -q "0 failed" /tmp/fleet11.log && ok "T17 surviving jobs clean" || { bad "T17 failures"; tail -n 20 /tmp/fleet11.log; }
+grep -qF '"dst":"vmrecv2","state":"cadence"' "$RJ" && ok "T17 cadence state in jsonl" || { bad "T17 jsonl"; tail -n 3 "$RJ"; }
+/etc/zfsrecvd/report.sh 2>/dev/null | grep -q "1 within cadence" && ok "T17 report shows the skip" || { bad "T17 report"; /etc/zfsrecvd/report.sh 2>&1 | head -n 8; }
+
+# --force-ec2 overrides the window
+/etc/zfsrecvd/fleetrun.sh --force-ec2 -c ~/fleet-cad.conf >/tmp/fleet12.log 2>&1
+rc=$?
+check "T17 force rc=0" test "$rc" -eq 0
+grep -q "cadence: overridden by --force-ec2" /tmp/fleet12.log && ok "T17 override announced" || { bad "T17 override"; grep -a "cadence" /tmp/fleet12.log; }
+grep -q "starting run listener on \[vmrecv2\]" /tmp/fleet12.log && ok "T17 forced host runs" || { bad "T17 forced"; tail -n 20 /tmp/fleet12.log; }
+grep -q "0 failed" /tmp/fleet12.log && ok "T17 forced run clean" || { bad "T17 forced failures"; tail -n 20 /tmp/fleet12.log; }
+
+# cadence on BOTH receivers: the whole run is a policy no-op, rc 0; the
+# ledger stays grouped (cadence lines + a bare run record follow them)
+sed -e 's/^vmrecv /vmrecv cadence=24h /' -e 's/^vmrecv2 /vmrecv2 cadence=24h /' ~/fleet-test.conf > ~/fleet-cad2.conf
+/etc/zfsrecvd/fleetrun.sh -c ~/fleet-cad2.conf >/tmp/fleet13.log 2>&1
+rc=$?
+check "T17 all-skip rc=0" test "$rc" -eq 0
+grep -q "nothing to do" /tmp/fleet13.log && ok "T17 all-skip announced" || { bad "T17 all-skip"; tail -n 10 /tmp/fleet13.log; }
+grep -q "minted run CA" /tmp/fleet13.log && bad "T17 all-skip still provisioned" || ok "T17 all-skip provisions nothing"
+/etc/zfsrecvd/report.sh 2>/dev/null | grep -q "0 ok, 0 not ok, 2 within cadence" && ok "T17 all-skip report tally" || { bad "T17 tally"; /etc/zfsrecvd/report.sh 2>&1 | head -n 5; }
+
+# age the whole ledger out of the window (ISO ts compares as a string;
+# 19xx loses to any cutoff): everything runs again
+sed -i 's/"ts":"20/"ts":"19/g' "$RJ"
+/etc/zfsrecvd/fleetrun.sh -c ~/fleet-cad.conf >/tmp/fleet14.log 2>&1
+rc=$?
+check "T17 expired-window rc=0" test "$rc" -eq 0
+grep -q "cadence: \[vmrecv2\]" /tmp/fleet14.log && bad "T17 expired window still skipped" || ok "T17 expired window runs again"
+grep -q "starting run listener on \[vmrecv2\]" /tmp/fleet14.log && ok "T17 vmrecv2 participates again" || { bad "T17 no vmrecv2"; tail -n 20 /tmp/fleet14.log; }
+grep -q "0 failed" /tmp/fleet14.log && ok "T17 expired-window run clean" || { bad "T17 expired failures"; tail -n 20 /tmp/fleet14.log; }
+
 echo
 echo "=== RESULT: $PASS passed, $FAIL failed ==="
 if [ "$FAIL" -gt 0 ]; then
-    for f in /tmp/fleet1.log /tmp/fleet2.log /tmp/fleet3.log /tmp/fleet4.log /tmp/fleet5.log /tmp/fleet6.log /tmp/fleet7.log /tmp/fleet8.log /tmp/fleet9.log /tmp/fleet10.log; do
+    for f in /tmp/fleet1.log /tmp/fleet2.log /tmp/fleet3.log /tmp/fleet4.log /tmp/fleet5.log /tmp/fleet6.log /tmp/fleet7.log /tmp/fleet8.log /tmp/fleet9.log /tmp/fleet10.log /tmp/fleet11.log /tmp/fleet12.log /tmp/fleet13.log /tmp/fleet14.log; do
         [ -f "$f" ] && { echo "--- $f tail ---"; tail -n 25 "$f"; }
     done
     for u in zfsrecvd-run-vmrecv zfsrecvd-run-vmrecv2 zfsrecvd-ha-vmrecv zfsrecvd-ha-vmrecv2; do

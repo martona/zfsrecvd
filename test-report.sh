@@ -15,6 +15,7 @@ cat > "$FX/runs.jsonl" <<'EOF'
 {"ts":"2026-07-29T01:01:00Z","kind":"run","run":"run-A","rc":0,"recv":[{"id":"berg","before":1000,"after":2024,"avail":5000000,"pruned":100},{"id":"cp4","before":500,"after":800,"avail":900000,"pruned":0}],"src":[{"id":"jup","tree":"tank/a","used":123456,"avail":777777}]}
 {"ts":"2026-07-30T01:00:00Z","snap":"zfsrecvd-2026-07-30-0100Z","src":"jup","tree":"tank/a","dst":"berg","state":"done","rc":"0","why":"","failed_ds":"","secs":9}
 {"ts":"2026-07-30T01:00:00Z","snap":"zfsrecvd-2026-07-30-0100Z","src":"jup","tree":"tank/a","dst":"cp4","state":"done","rc":"2","why":"some datasets failed","failed_ds":"tank/a/vol tank/a/deep","secs":44}
+{"ts":"2026-07-30T01:00:40Z","snap":"","src":"jup","tree":"tank/c","dst":"ec2","state":"cadence","rc":"0","why":"last ok 2026-07-29T20:00:00Z (cadence 24h)","failed_ds":"","secs":0}
 {"ts":"2026-07-30T01:01:00Z","kind":"run","run":"run-B","rc":2,"recv":[{"id":"berg","before":2024,"after":4072,"avail":4990000,"pruned":512},{"id":"cp4","before":800,"after":800,"avail":900000,"pruned":0}],"src":[{"id":"jup","tree":"tank/a","used":200000,"avail":700000}],"gc":[{"id":"berg","gc":"tank/recv/x/gone: ORPHAN CANDIDATE -- 42d behind siblings; eligible in 48d"},{"id":"cp4","gc":"all quiet: 1 client(s), 3 datasets, everything fresh"}]}
 EOF
 
@@ -22,7 +23,8 @@ out=$(bash "$HERE/report.sh" -f "$FX/runs.jsonl" 2>&1)
 rc=$?
 [[ $rc -eq 0 ]] && ok "renders rc=0" || { bad "rc=$rc"; echo "$out"; }
 grep -q "last run: run-B" <<<"$out" && ok "latest run selected" || bad "latest: $out"
-grep -q "jobs: 1 ok, 1 not ok" <<<"$out" && ok "job tally" || bad "tally: $out"
+grep -q "jobs: 1 ok, 1 not ok, 1 within cadence" <<<"$out" && ok "job tally incl cadence" || bad "tally: $out"
+grep -q "FAIL.*tank/c" <<<"$out" && bad "cadence job rendered as FAIL" || ok "cadence job is not a failure"
 grep -q "FAIL  \[jup\] tank/a -> \[cp4\]" <<<"$out" && ok "failure drilldown line" || bad "fail line: $out"
 grep -q "datasets: tank/a/vol tank/a/deep" <<<"$out" && ok "failed_ds surfaced" || bad "failed_ds: $out"
 # table rows are exact-line asserts: they prove the right-alignment, not
@@ -51,6 +53,7 @@ out2=$(bash "$HERE/report.sh" -f "$FX/old.jsonl" 2>&1)
 rc=$?
 [[ $rc -eq 0 && "$out2" == *"last run: run-old"* ]] && ok "gc-less record renders" || { bad "compat rc=$rc"; echo "$out2"; }
 grep -q "  gc \[" <<<"$out2" && bad "gc section on gc-less record" || ok "no gc section when absent"
+grep -q "within cadence" <<<"$out2" && bad "cadence suffix on cadence-less run" || ok "no cadence suffix when none"
 
 echo "=== RESULT: $PASS passed, $FAIL failed ==="
 [[ $FAIL -eq 0 ]]
