@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# zfsrecvd protocol 2.0 end-to-end test suite. Runs ON the test VM.
+# zfsrecvd protocol 2.0/2.1 end-to-end test suite. Runs ON the test VM.
+# T1-T10 exercise the full transfer machinery (now over a 2.1 session);
+# T8 hand-drives a 2.0 session, proving the compat path. T11+ are the
+# 2.1 GUID features: unknown-since stamps, the base guid veto,
+# rename-aside, cursor catch-up survival, received-bytes.
 # Assumes: repo scripts in ~/zfsrecvd-src, passwordless sudo, zfs, socat, pv.
 # Everything happens in a file-backed pool "ztest"; rpool/bpool untouched.
 set -uo pipefail
@@ -196,6 +200,86 @@ t10=$((SECONDS-start))
 n_ds=$(sudo zfs list -H -r -t filesystem,volume ztest/src | wc -l)
 echo "INFO: up-to-date run over $n_ds datasets took ${t10}s"
 check "T10 up-to-date run <8s (took $t10)" test "$t10" -lt 8
+
+echo "=== T11: receiver-only snapshots get unknown-since; reappearance clears ==="
+# (a) a non-prefix snapshot that exists only on the receiver is stamped
+sudo zfs snapshot "$DEST/b@recvonly"
+# (b) a synced snapshot carrying a stale stamp is cleared (guid reappears)
+sudo zfs set zfsrecvd:unknown-since=2026-01-01T00:00:00Z "$DEST/b@s2"
+sudo /etc/zfsrecvd/sendtree.sh ztest/src localhost >/tmp/t11.log 2>&1
+rc=$?
+check "T11 exit 0" test "$rc" -eq 0
+us=$(sudo zfs get -H -s local -o value zfsrecvd:unknown-since "$DEST/b@recvonly" 2>/dev/null)
+if [ -n "$us" ] && [ "$us" != "-" ]; then ok "T11 receiver-only snap stamped ($us)"; else bad "T11 stamp missing (got '$us')"; fi
+us2=$(sudo zfs get -H -s local -o value zfsrecvd:unknown-since "$DEST/b@s2" 2>/dev/null)
+if [ -z "$us2" ] || [ "$us2" = "-" ]; then ok "T11 reappeared snap cleared"; else bad "T11 stale stamp survived ($us2)"; fi
+grep -q "receiver-only snapshots" /tmp/t11.log && ok "T11 sender NOTE still emitted" || bad "T11 sender NOTE"
+# prefix snaps are the grid's business: none may carry a stamp
+pn=$(sudo zfs get -H -r -s local -t snapshot -o name,value zfsrecvd:unknown-since "$DEST" | grep -c "@zfsrecvd-") || pn=0
+check "T11 no prefix snap stamped (got $pn)" test "$pn" -eq 0
+
+echo "=== T12: snapshot name reuse -> guid veto -> replanned base ==="
+sudo zfs snapshot ztest/src/c@dup
+sudo /etc/zfsrecvd/send.sh ztest/src/c@dup localhost >/tmp/t12a.log 2>&1 || bad "T12 seed sync failed"
+sudo zfs destroy ztest/src/c@dup
+sudo zfs snapshot ztest/src/c@dup          # same name, new guid
+sudo zfs snapshot ztest/src/c@dup2
+sudo /etc/zfsrecvd/send.sh ztest/src/c@dup2 localhost >/tmp/t12b.log 2>&1
+rc=$?
+check "T12 exit 0" test "$rc" -eq 0
+grep -q "guid mismatch" /tmp/t12b.log && ok "T12 veto refusal observed" || { bad "T12 veto"; cat /tmp/t12b.log; }
+grep -q "rebootstrapping" /tmp/t12b.log && ok "T12 collision fallback taken" || { bad "T12 fallback"; cat /tmp/t12b.log; }
+cgone=$(sudo zfs list -H -o name | grep -c "^$DEST/c\.gone-") || cgone=0
+check "T12 old history renamed aside (got $cgone)" test "$cgone" -eq 1
+check "T12 dup2 arrived" sudo zfs list -H "$DEST/c@dup2"
+sg=$(sudo zfs get -H -o value guid ztest/src/c@dup)
+dg=$(sudo zfs get -H -o value guid "$DEST/c@dup" 2>/dev/null)
+check "T12 receiver @dup is now the source's object" test "$sg" = "$dg"
+
+echo "=== T13: recreated dataset and zvol get renamed aside, not clobbered ==="
+sudo zfs destroy -r ztest/src/d
+sudo zfs create ztest/src/d
+sudo zfs snapshot ztest/src/d@n1
+sudo /etc/zfsrecvd/send.sh ztest/src/d@n1 localhost >/tmp/t13a.log 2>&1
+rc=$?
+check "T13 fs exit 0" test "$rc" -eq 0
+check "T13 fs newcomer arrived" sudo zfs list -H "$DEST/d@n1"
+gone=$(sudo zfs list -H -o name | grep -c "^$DEST/d\.gone-") || gone=0
+check "T13 fs old lineage renamed aside (got $gone)" test "$gone" -eq 1
+check "T13 fs old history preserved" bash -c "sudo zfs list -H -t snapshot -o name | grep -q '^$DEST/d\.gone-.*@s1'"
+# the zvol variant -- pre-2.1 this full -R onto an existing zvol killed
+# the session (the known T14-era edge)
+sudo zfs destroy -r ztest/src/vol
+sudo zfs create -V 16M ztest/src/vol
+wait_zvol /dev/zvol/ztest/src/vol
+sudo dd if=/dev/urandom of=/dev/zvol/ztest/src/vol bs=1M count=4 oflag=direct 2>/dev/null
+sudo zfs snapshot ztest/src/vol@vn1
+sudo /etc/zfsrecvd/send.sh ztest/src/vol@vn1 localhost >/tmp/t13b.log 2>&1
+rc=$?
+check "T13 zvol exit 0" test "$rc" -eq 0
+check "T13 zvol newcomer arrived" sudo zfs list -H "$DEST/vol@vn1"
+vgone=$(sudo zfs list -H -o name | grep -c "^$DEST/vol\.gone-") || vgone=0
+check "T13 zvol old lineage renamed aside (got $vgone)" test "$vgone" -eq 1
+
+echo "=== T14: cursor catch-up survives the collision pass (zero snap overlap) ==="
+# destroy every source snapshot of e; the cursor bookmark is the only
+# lineage evidence left -- the naive zero-overlap rule would rename e
+# aside and force a full re-send
+sudo zfs list -H -t snapshot -d 1 -o name ztest/src/e | while read -r s; do sudo zfs destroy "$s"; done
+sudo zfs snapshot ztest/src/e@fresh
+sudo /etc/zfsrecvd/send.sh ztest/src/e@fresh localhost >/tmp/t14.log 2>&1
+rc=$?
+check "T14 exit 0" test "$rc" -eq 0
+grep -q "(cursor catch-up)" /tmp/t14.log && ok "T14 catch-up path taken" || { bad "T14 catch-up"; cat /tmp/t14.log; }
+egone=$(sudo zfs list -H -o name | grep -c "^$DEST/e\.gone-") || egone=0
+check "T14 e NOT renamed aside (got $egone)" test "$egone" -eq 0
+check "T14 e@fresh arrived" sudo zfs list -H "$DEST/e@fresh"
+
+echo "=== T15: received-bytes ride the OK line ==="
+wb=$(grep -a "WIRE-BYTES:" /tmp/t13b.log | tail -n 1 | sed 's/.*WIRE-BYTES: //')
+if [ -n "$wb" ] && [ "$wb" -gt 0 ] 2>/dev/null; then ok "T15 wire bytes counted ($wb)"; else bad "T15 wire bytes (got '$wb')"; cat /tmp/t13b.log; fi
+sudo /etc/zfsrecvd/sendtree.sh ztest/src localhost >/tmp/t15.log 2>&1 || bad "T15 up-to-date run failed"
+grep -q "WIRE-BYTES: 0" /tmp/t15.log && ok "T15 up-to-date run counts zero" || { bad "T15 zero"; grep -a "WIRE-BYTES" /tmp/t15.log; }
 
 echo
 echo "=== RESULT: $PASS passed, $FAIL failed ==="

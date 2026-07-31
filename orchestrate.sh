@@ -509,12 +509,16 @@ if [[ -n "$report_dir" ]]; then
         # exists (live board keeps logs of failing jobs); headless runs
         # leave the FAILED-DATASETS line in the journal instead.
         fdl=""
+        wbl=0
         if [[ -n "$logdir" && -f "$(job_log "$i")" ]]; then
             fdl=$(grep -a "FAILED-DATASETS:" "$(job_log "$i")" 2>/dev/null | tail -n 1 | sed -e 's/\r$//' -e 's/.*FAILED-DATASETS: //') || fdl=""
+            # receiver-reported wire bytes (2.1); 0 when absent/2.0
+            wbl=$(grep -a "WIRE-BYTES:" "$(job_log "$i")" 2>/dev/null | tail -n 1 | sed -e 's/\r$//' -e 's/.*WIRE-BYTES: //') || wbl=0
+            [[ "$wbl" =~ ^[0-9]+$ ]] || wbl=0
         fi
-        printf '{"ts":"%s","snap":"%s","src":"%s","tree":"%s","dst":"%s","state":"%s","rc":"%s","why":"%s","failed_ds":"%s","secs":%s}\n' \
+        printf '{"ts":"%s","snap":"%s","src":"%s","tree":"%s","dst":"%s","state":"%s","rc":"%s","why":"%s","failed_ds":"%s","bytes":%s,"secs":%s}\n' \
             "$report_ts" "$snap" "${J_SRC[i]}" "${J_TREE[i]}" "${J_DST[i]}" \
-            "${J_STATE[i]}" "${J_RC[i]:-}" "${J_WHY[i]:-}" "$fdl" "${J_SECS[i]:-0}"
+            "${J_STATE[i]}" "${J_RC[i]:-}" "${J_WHY[i]:-}" "$fdl" "$wbl" "${J_SECS[i]:-0}"
     done >> "$report_dir/runs.jsonl" 2>/dev/null || true
 fi
 

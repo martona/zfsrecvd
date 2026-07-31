@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# zfsrecvd protocol 2.0 sender: replicates a dataset tree over one TLS
-# session. See PROTOCOL.md for the wire contract.
+# zfsrecvd protocol 2.0/2.1 sender: replicates a dataset tree over one TLS
+# session. See PROTOCOL.md for the wire contract. Speaks 2.1 (manifest
+# snapshot+cursor guids, guid-veto replanning, received-bytes) and
+# restricts itself to 2.0 when the receiver's greeting says so.
 #
 # Usage: sendtree.sh [--single] [--no-prune] <dataset[@snap]> <remote_host>
 #        sendtree.sh --prune-only <dataset>
@@ -167,11 +169,13 @@ dest_id="${ZFSRECVD_DEST_ID:-$remote}"
 dest_id="${dest_id//[^A-Za-z0-9._-]/_}"
 
 #
-# ---------- 1.  gather local state (3 zfs invocations) -----------------------
+# ---------- 1.  gather local state (4 zfs invocations) -----------------------
 #
 datasets=()                          # tree in zfs list -r order (parents first)
 declare -A dstype                    # dataset -> filesystem|volume
 declare -A lsnaps                    # dataset -> local snaps, comma-joined, oldest first
+declare -A lpairs                    # dataset -> "snap:guid,..." same order (2.1 manifest)
+declare -A bpairs                    # dataset -> "#bookmark:guid,..." cursor lineage evidence
 declare -A encroot encon             # encryptionroot / encryption per dataset
 
 while IFS=$'\t' read -r name typ; do
@@ -189,16 +193,36 @@ if [[ ${#datasets[@]} -eq 0 ]]; then
     exit 2
 fi
 
-while IFS= read -r s; do
+while IFS=$'\t' read -r s gd; do
     ds="${s%@*}"
     sn="${s#*@}"
     lsnaps[$ds]="${lsnaps[$ds]:-}${lsnaps[$ds]:+,}$sn"
+    lpairs[$ds]="${lpairs[$ds]:-}${lpairs[$ds]:+,}$sn:$gd"
 done < <(
     if [[ -n "$single" ]]; then
-        zfs list -H -t snapshot -s creation -d 1 -o name "$root"
+        zfs list -H -t snapshot -s creation -d 1 -o name,guid "$root"
     else
-        zfs list -H -r -t snapshot -s creation -o name "$root"
+        zfs list -H -r -t snapshot -s creation -o name,guid "$root"
     fi
+)
+
+# Replication cursors as manifest entries (2.1): every zfsrecvd-* bookmark
+# regardless of destination -- each one is lineage evidence for the
+# server's collision pass ("this guid was in my history"), and more
+# evidence means fewer false rename-asides. A bookmark's guid is its
+# origin snapshot's guid, which is exactly what makes a cursor-catch-up
+# tree (zero snapshot overlap, live cursor) distinguishable from a
+# recreated-under-the-same-name tree (zero overlap, no cursor).
+while IFS=$'\t' read -r b gd; do
+    [[ "$b" == *#zfsrecvd-* ]] || continue
+    ds="${b%%#*}"
+    bpairs[$ds]="${bpairs[$ds]:-}${bpairs[$ds]:+,}#${b#*#}:$gd"
+done < <(
+    if [[ -n "$single" ]]; then
+        zfs list -H -t bookmark -d 1 -o name,guid "$root" 2>/dev/null
+    else
+        zfs list -H -r -t bookmark -o name,guid "$root" 2>/dev/null
+    fi || true
 )
 
 while IFS=$'\t' read -r name prop val; do
@@ -355,15 +379,18 @@ connect_session() {
         exec {OUT}>&"${NET[1]}"
         exec {IN}<&"${NET[0]}"
     fi
-    printf 'zfsrecvd2.0\n' >&"$OUT" 2>/dev/null || { close_session; return 1; }
+    printf 'zfsrecvd2.1\n' >&"$OUT" 2>/dev/null || { close_session; return 1; }
     local g
     IFS= read -r -t 15 -u "$IN" g || { close_session; return 1; }
-    if [[ "$g" != "OK zfsrecvd2.0" ]]; then
-        echo "ERROR: unexpected greeting from [$remote]: $g" >&2
-        close_session
-        return 1
-    fi
-    echo "connected to [$remote] (zfsrecvd2.0${tunnel_port[$remote]:+, haproxy tunnel})" >&2
+    case "$g" in
+        "OK zfsrecvd2.1") session_minor=1 ;;
+        "OK zfsrecvd2.0") session_minor=0 ;;   # older receiver: restrict to 2.0
+        *)
+            echo "ERROR: unexpected greeting from [$remote]: $g" >&2
+            close_session
+            return 1 ;;
+    esac
+    echo "connected to [$remote] (zfsrecvd2.$session_minor${tunnel_port[$remote]:+, haproxy tunnel})" >&2
     return 0
 }
 
@@ -372,12 +399,26 @@ connect_session() {
 # treats that as a dead session.
 declare -A have              # dataset -> receiver's snaps, comma-joined, oldest first
 declare -A token             # dataset -> receiver's pending resume token
+session_minor=0              # set by connect_session from the greeting
 send_tree_block() {
     {
         printf 'TREE %s %s\n' "$root" "$target"
-        local d
+        local d ent
         for d in "${datasets[@]}"; do
-            printf 'DS %s\n' "$d"
+            if (( session_minor >= 1 )); then
+                # 2.1 manifest: snapshot guids + cursor bookmark guids
+                ent="${lpairs[$d]:-}"
+                if [[ -n "${bpairs[$d]:-}" ]]; then
+                    ent="${ent}${ent:+,}${bpairs[$d]}"
+                fi
+                if [[ -n "$ent" ]]; then
+                    printf 'DS %s %s\n' "$d" "$ent"
+                else
+                    printf 'DS %s\n' "$d"
+                fi
+            else
+                printf 'DS %s\n' "$d"
+            fi
         done
         printf '\n'
     } >&"$OUT" 2>/dev/null || return 1
@@ -409,6 +450,8 @@ send_tree_block() {
 # post-GO error: an unframed stream can't be resynchronized, so both sides
 # abandon the connection and we rely on reconnect + resume tokens).
 sent_n=0                     # successful transfers this run (for the summary)
+wire_bytes=0                 # receiver-reported bytes this run (2.1 OK lines)
+LAST_REFUSAL=""              # detail of the last ERR refused (guid-veto replanning)
 xfer() {
     local announce="$1" est="$2" cmdline="$3"
     shift 3
@@ -417,7 +460,8 @@ xfer() {
     local reply
     IFS= read -r -t 120 -u "$IN" reply || return 2
     if [[ "$reply" == ERR\ refused\ * ]]; then
-        echo "ERROR: receiver refused: ${reply#ERR refused }" >&2
+        LAST_REFUSAL="${reply#ERR refused }"
+        echo "ERROR: receiver refused: $LAST_REFUSAL" >&2
         return 1
     fi
     [[ "$reply" == "GO" ]] || return 2
@@ -447,6 +491,13 @@ xfer() {
     case "$reply" in
         OK\ *)
             sent_n=$(( sent_n + 1 ))
+            # 2.1 result lines carry the receiver's byte count ("-" when
+            # it could not tell); 2.0 lines have no third field.
+            local okb
+            read -r _ _ okb _ <<<"$reply"
+            if [[ "${okb:-}" =~ ^[0-9]+$ ]]; then
+                wire_bytes=$(( wire_bytes + okb ))
+            fi
             return 0 ;;
         ERR\ *)
             echo "ERROR: receiver: ${reply#ERR }" >&2
@@ -549,15 +600,39 @@ plan_one() {
     fi
 
     # Newest snapshot both sides know, by name: the incremental base.
-    common=$(local_newest_common "$ds")
-    if [[ -n "$common" ]]; then
+    # Under 2.1 the server may refuse a base with "guid-mismatch" -- the
+    # receiver's same-named snapshot is a different object (name reuse).
+    # That name is no good as a base forever, so drop it from the
+    # receiver's list and replan: next-newest common, then the cursor,
+    # then bootstrap/full, exactly as if the name had never matched.
+    local hh
+    while common=$(local_newest_common "$ds"); [[ -n "$common" ]]; do
         est=$(estimate $flags -I "${ds}@${common}" "${ds}@${target}")
         xfer "${ds}@${common}${dest_tag}" "$est" "SEND $ds $common $target $est" \
             $flags -I "${ds}@${common}" "${ds}@${target}"
         rc=$?
+        if [[ $rc -eq 1 && "$LAST_REFUSAL" == *guid-mismatch* ]]; then
+            echo "NOTE: [$ds] receiver's @$common is a different object (guid mismatch); replanning without it" >&2
+            hh=",${have[$ds]},"
+            hh="${hh/,"$common",/,}"
+            hh="${hh#,}"
+            hh="${hh%,}"
+            have[$ds]="$hh"
+            continue
+        fi
+        if [[ $rc -eq 1 && "$LAST_REFUSAL" == *snapshot-collision* ]]; then
+            # A same-named different snapshot sits inside every usable -I
+            # range. No incremental can land; rebootstrap instead -- the
+            # server moves the receiver's history aside whole at our
+            # first full send, so nothing is lost, and the bootstrap
+            # two-step restores depth.
+            echo "NOTE: [$ds] snapshot name collision on receiver; rebootstrapping (receiver history moves aside)" >&2
+            have[$ds]=""
+            break
+        fi
         [[ $rc -eq 0 ]] && advance_cursor "$ds" "$target"
         return $rc
-    fi
+    done
 
     # No common snapshot survives -- before falling back to a resend, try
     # the cursor: the receiver may still hold a snapshot we only remember
@@ -576,8 +651,21 @@ plan_one() {
         xfer "${ds}@${cbase} (cursor catch-up)${dest_tag}" "$est" "SEND $ds $cbase $target $est" \
             $cflags -i "${ds}#zfsrecvd-${dest_id}-${cbase}" "${ds}@${target}"
         rc=$?
-        [[ $rc -eq 0 ]] && advance_cursor "$ds" "$target"
-        return $rc
+        if [[ $rc -eq 1 && "$LAST_REFUSAL" == *guid-mismatch* ]]; then
+            # The receiver's @cbase is not the snapshot our cursor points
+            # at (recreated under the same name). The cursor is useless
+            # against this receiver; fall through to bootstrap/full --
+            # the server moves its imposter aside at the full send.
+            echo "NOTE: [$ds] cursor base @$cbase is a different object on the receiver; falling back" >&2
+            hh=",${have[$ds]},"
+            hh="${hh/,"$cbase",/,}"
+            hh="${hh#,}"
+            hh="${hh%,}"
+            have[$ds]="$hh"
+        else
+            [[ $rc -eq 0 ]] && advance_cursor "$ds" "$target"
+            return $rc
+        fi
     fi
 
     if [[ -z "${have[$ds]:-}" ]]; then
@@ -761,6 +849,9 @@ if [[ -z "$no_prune" ]]; then
 fi
 
 echo "Tree [$root@$target]${dest_tag}: $sent_n sent, $utd_n up to date, $skip_n skipped, ${#failed[@]} failed" >&2
+# machine-readable receiver-side byte count (2.1 OK lines; 0 on a 2.0
+# session or an all-up-to-date run) -- orchestrate harvests it per job
+echo "WIRE-BYTES: $wire_bytes" >&2
 if [[ ${#failed[@]} -gt 0 ]]; then
     echo "Failed datasets for [$remote]:" >&2
     printf '  %s\n' "${failed[@]}" >&2

@@ -57,9 +57,10 @@ END {
     if (runs == 0) { print "no complete runs recorded yet"; exit }
     r = runs
     printf "last run: %s  (%s, rc %s)\n", g(rline[r], "run"), g(rline[r], "ts"), g(rline[r], "rc")
-    ok = 0; bad = 0; cad = 0; unr = 0; es = 0
+    ok = 0; bad = 0; cad = 0; unr = 0; es = 0; wb = 0
     for (i = jstart[r]; i <= jend[r]; i++) {
         st = g(J[i], "state"); rc = g(J[i], "rc")
+        wb += g(J[i], "bytes") + 0
         if (st == "done" && rc == "0") { ok++; continue }
         if (st == "cadence") {
             w = g(J[i], "why")
@@ -78,6 +79,7 @@ END {
     if (cad > 0) printf ", %d within cadence", cad
     if (unr > 0) printf ", %d source offline", unr
     if (es > 0) printf ", %d ec2 skipped", es
+    if (wb > 0) printf ", %s on wire", h(wb)
     printf "\n"
 
     # receivers table: numbers right-aligned, widths from content
