@@ -354,10 +354,35 @@ grep -q "cadence: \[vmrecv2\]" /tmp/fleet14.log && bad "T17 expired window still
 grep -q "starting run listener on \[vmrecv2\]" /tmp/fleet14.log && ok "T17 vmrecv2 participates again" || { bad "T17 no vmrecv2"; tail -n 20 /tmp/fleet14.log; }
 grep -q "0 failed" /tmp/fleet14.log && ok "T17 expired-window run clean" || { bad "T17 expired failures"; tail -n 20 /tmp/fleet14.log; }
 
+echo "=== T18: --skip-ec2 drops ec2= destinations outright ==="
+# vmrecv2 poses as an EC2 host; --skip-ec2 must drop its job BEFORE the
+# wake set is derived (no aws call ever happens -- the rig has no aws
+# cli, so a leak here would fail loudly) and leave it unprovisioned.
+sed 's/^vmrecv2 /vmrecv2 ec2=i-00000000 /' ~/fleet-test.conf > ~/fleet-skipec2.conf
+/etc/zfsrecvd/fleetrun.sh --skip-ec2 -c ~/fleet-skipec2.conf >/tmp/fleet16.log 2>&1
+rc=$?
+check "T18 rc=0 (skip is not a failure)" test "$rc" -eq 0
+grep -q "skip-ec2: \[vmrecv2\] 1 job(s) dropped" /tmp/fleet16.log && ok "T18 drop announced" || { bad "T18 announce"; grep -a "skip-ec2" /tmp/fleet16.log; }
+grep -q "starting run listener on \[vmrecv2\]" /tmp/fleet16.log && bad "T18 dropped host was provisioned" || ok "T18 dropped host left untouched"
+grep -q "0 failed" /tmp/fleet16.log && ok "T18 surviving jobs clean" || { bad "T18 failures"; tail -n 20 /tmp/fleet16.log; }
+grep -qF '"dst":"vmrecv2","state":"cadence","rc":"0","why":"skipped by --skip-ec2"' "$RJ" && ok "T18 skip in jsonl" || { bad "T18 jsonl"; tail -n 3 "$RJ"; }
+/etc/zfsrecvd/report.sh 2>/dev/null | grep -q "1 ec2 skipped" && ok "T18 report tallies separately" || { bad "T18 tally"; /etc/zfsrecvd/report.sh 2>&1 | head -n 8; }
+
+# contradictory flags refuse loudly
+/etc/zfsrecvd/fleetrun.sh --skip-ec2 --force-ec2 -c ~/fleet-skipec2.conf >/tmp/fleet17.log 2>&1
+rc=$?
+check "T18 --skip-ec2 --force-ec2 is a usage error" test "$rc" -eq 64
+
+# --check names the dropped rows
+/etc/zfsrecvd/fleetrun.sh --skip-ec2 --check -c ~/fleet-skipec2.conf >/tmp/fleet18.log 2>&1
+rc=$?
+check "T18 check rc=0" test "$rc" -eq 0
+grep -q "SKIPPED (--skip-ec2)" /tmp/fleet18.log && ok "T18 check lists the drop" || { bad "T18 check"; grep -a "job:" /tmp/fleet18.log; }
+
 echo
 echo "=== RESULT: $PASS passed, $FAIL failed ==="
 if [ "$FAIL" -gt 0 ]; then
-    for f in /tmp/fleet1.log /tmp/fleet2.log /tmp/fleet3.log /tmp/fleet4.log /tmp/fleet5.log /tmp/fleet6.log /tmp/fleet7.log /tmp/fleet8.log /tmp/fleet9.log /tmp/fleet10.log /tmp/fleet11.log /tmp/fleet12.log /tmp/fleet13.log /tmp/fleet14.log /tmp/fleet15.log; do
+    for f in /tmp/fleet1.log /tmp/fleet2.log /tmp/fleet3.log /tmp/fleet4.log /tmp/fleet5.log /tmp/fleet6.log /tmp/fleet7.log /tmp/fleet8.log /tmp/fleet9.log /tmp/fleet10.log /tmp/fleet11.log /tmp/fleet12.log /tmp/fleet13.log /tmp/fleet14.log /tmp/fleet15.log /tmp/fleet16.log /tmp/fleet17.log /tmp/fleet18.log; do
         [ -f "$f" ] && { echo "--- $f tail ---"; tail -n 25 "$f"; }
     done
     for u in zfsrecvd-run-vmrecv zfsrecvd-run-vmrecv2 zfsrecvd-ha-vmrecv zfsrecvd-ha-vmrecv2; do

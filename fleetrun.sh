@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # The Final Shape driver: one run of the whole fleet from one config.
 #
-#   fleetrun.sh [-c fleet.conf] [--check] [--keep] [--force-ec2] [-- orchestrate args]
+#   fleetrun.sh [-c fleet.conf] [--check] [--keep] [--force-ec2|--skip-ec2] [-- orchestrate args]
 #
 # Reads fleet.conf (see fleetparser.sh / PROTOCOL.md §18), then:
 #   0. drops jobs whose (source, tree, dest) succeeded within the dest's
 #      cadence= window (--force-ec2 overrides); a destination whose jobs
-#      all dropped is left alone entirely -- EC2 stays asleep,
+#      all dropped is left alone entirely -- EC2 stays asleep.
+#      --skip-ec2 is the inverse of --force-ec2: every job whose
+#      destination carries ec2= is dropped outright, window or no window
+#      (operator doing maintenance ON the instance; the host must not be
+#      provisioned, run against, or stopped),
 #   1. wakes any EC2 hosts participating in this run,
 #   2. mints a per-run CA and per-host certs (keys are generated ON the
 #      hosts and never transit; validity is a constant 365 days -- the
@@ -64,6 +68,7 @@ FLEET_SCRIPTS=(
 check_only=""
 keep_rundir=""
 force_ec2=""
+skip_ec2=""
 orch_args=()
 while (( $# > 0 )); do
     case "$1" in
@@ -71,11 +76,16 @@ while (( $# > 0 )); do
         --check)     check_only=1; shift ;;
         --keep)      keep_rundir=1; shift ;;
         --force-ec2) force_ec2=1; shift ;;
+        --skip-ec2)  skip_ec2=1; shift ;;
         --)          shift; orch_args=( "$@" ); break ;;
-        *)           echo "Usage: $0 [-c fleet.conf] [--check] [--keep] [--force-ec2] [-- orchestrate args]" >&2
+        *)           echo "Usage: $0 [-c fleet.conf] [--check] [--keep] [--force-ec2|--skip-ec2] [-- orchestrate args]" >&2
                      exit 64 ;;
     esac
 done
+if [[ -n "$force_ec2" && -n "$skip_ec2" ]]; then
+    echo "ERROR: --force-ec2 and --skip-ec2 are contradictory" >&2
+    exit 64
+fi
 
 fleet_parse "$FLEET_CONF"
 
@@ -130,6 +140,44 @@ append_cadence_jobs() {
 # no date parsing, no mktime (mawk-safe by construction).
 cad_src=(); cad_tree=(); cad_dest=(); cad_ok=(); cad_why=()
 declare -A cad_n=() cad_newest=()
+
+# --skip-ec2 runs first and unconditionally: jobs to ec2= destinations
+# are dropped without consulting any ledger, and the trimmed job list is
+# re-derived so the host leaves the participant set entirely (never
+# woken, provisioned, or stopped). Skipped jobs ride the same cad_*
+# arrays -> jsonl state "cadence" with a distinguishing why, exactly the
+# offline-source precedent; report.sh tallies them separately.
+skip_ec2_n=0
+if [[ -n "$skip_ec2" ]]; then
+    declare -A _skip_n=()
+    _keep_src=(); _keep_tree=(); _keep_dest=()
+    for (( i = 0; i < ${#fleet_job_src[@]}; i++ )); do
+        d="${fleet_job_dest[i]}"
+        if [[ -n "${fleet_host_ec2[$d]:-}" ]]; then
+            cad_src+=( "${fleet_job_src[i]}" )
+            cad_tree+=( "${fleet_job_tree[i]}" )
+            cad_dest+=( "$d" )
+            cad_ok+=( "-" )
+            cad_why+=( "skipped by --skip-ec2" )
+            _skip_n[$d]=$(( ${_skip_n[$d]:-0} + 1 ))
+            skip_ec2_n=$(( skip_ec2_n + 1 ))
+        else
+            _keep_src+=( "${fleet_job_src[i]}" )
+            _keep_tree+=( "${fleet_job_tree[i]}" )
+            _keep_dest+=( "${fleet_job_dest[i]}" )
+        fi
+    done
+    if (( skip_ec2_n > 0 )); then
+        fleet_job_src=( "${_keep_src[@]}" )
+        fleet_job_tree=( "${_keep_tree[@]}" )
+        fleet_job_dest=( "${_keep_dest[@]}" )
+        fleet_derive
+        for d in "${!_skip_n[@]}"; do
+            echo "skip-ec2: [$d] ${_skip_n[$d]} job(s) dropped; host left untouched" >&2
+        done
+    fi
+fi
+
 has_cadence=""
 for h in "${fleet_receivers[@]}"; do
     if [[ -n "${fleet_host_cadence[$h]:-}" ]]; then
@@ -270,8 +318,11 @@ echo "fleet plan: ${#fleet_job_src[@]} jobs, sources: ${fleet_sources[*]}, recei
 if [[ ${#wake_ids[@]} -gt 0 ]]; then
     echo "fleet plan: EC2 wake set: ${wake_ids[*]}" >&2
 fi
-if (( ${#cad_src[@]} > 0 )); then
-    echo "fleet plan: ${#cad_src[@]} job(s) skipped by cadence" >&2
+if (( ${#cad_src[@]} - skip_ec2_n > 0 )); then
+    echo "fleet plan: $(( ${#cad_src[@]} - skip_ec2_n )) job(s) skipped by cadence" >&2
+fi
+if (( skip_ec2_n > 0 )); then
+    echo "fleet plan: $skip_ec2_n job(s) dropped by --skip-ec2" >&2
 fi
 if [[ "$fleet_opt_transport" == "haproxy" ]]; then
     echo "fleet plan: transport haproxy (PP2 identity)" >&2
@@ -286,9 +337,15 @@ if [[ -n "$check_only" ]]; then
     done
     local_i=0
     while (( local_i < ${#cad_src[@]} )); do
-        printf '  job: %s %s -> %s SKIPPED (within cadence, last ok %s)\n' \
-            "${cad_src[local_i]}" "${cad_tree[local_i]}" \
-            "${cad_dest[local_i]}" "${cad_ok[local_i]}" >&2
+        if [[ "${cad_why[local_i]}" == "skipped by --skip-ec2" ]]; then
+            printf '  job: %s %s -> %s SKIPPED (--skip-ec2)\n' \
+                "${cad_src[local_i]}" "${cad_tree[local_i]}" \
+                "${cad_dest[local_i]}" >&2
+        else
+            printf '  job: %s %s -> %s SKIPPED (within cadence, last ok %s)\n' \
+                "${cad_src[local_i]}" "${cad_tree[local_i]}" \
+                "${cad_dest[local_i]}" "${cad_ok[local_i]}" >&2
+        fi
         local_i=$(( local_i + 1 ))
     done
     echo "fleet plan: OK (check only, nothing provisioned)" >&2
@@ -305,7 +362,11 @@ if (( ${#fleet_job_src[@]} == 0 )); then
     # The jsonl still gets the cadence lines plus a bare run record so
     # report.sh's positional grouping stays intact (job lines must never
     # dangle without a following record).
-    echo "cadence: every job is within its destination's window; nothing to do" >&2
+    if (( skip_ec2_n > 0 )); then
+        echo "nothing to do: every job dropped by cadence or --skip-ec2" >&2
+    else
+        echo "cadence: every job is within its destination's window; nothing to do" >&2
+    fi
     report_dir_resolve
     append_cadence_jobs
     if [[ -n "$report_dir" && ${#cad_src[@]} -gt 0 ]]; then
