@@ -576,28 +576,57 @@ prune_tree() {
 # is the foundation the future orphan GC reads). One zfs set for the whole
 # batch, with a per-dataset fallback in case a zfs version dislikes
 # multiple targets.
-# 2.1 receiver-only snapshot bookkeeping (PROTOCOL.md §22): judged by GUID
-# against the manifest evidence, non-prefix names only (grid-prefix snaps
-# are the retention grid's business, never stamped). Stamps are read with
-# source=local ONLY -- user properties inherit, and an inherited value is
-# not a stamp (§17 doctrine). unknown-since starts the reclaim grace
-# clock at FIRST absence; a snapshot whose guid reappears in the manifest
-# is known again, and the stamp is cleared -- that is the all-clear.
-stamp_unknown() {
+# 2.1 absence bookkeeping (PROTOCOL.md §22), both levels, at ENDTREE:
+#   datasets:  a receiver dataset the manifest does not list is absent at
+#              source -- the session itself is the liveness proof, so the
+#              orphan clock starts NOW (manifest-driven GC; the old
+#              relative-staleness inference is retired). Reappearance in
+#              a manifest clears the clock. The server owns ALL clocks;
+#              gc.sh only reads them.
+#   snapshots: judged by GUID against the manifest evidence, non-prefix
+#              names only (grid-prefix snaps are the retention grid's
+#              business). unknown-since starts at FIRST absence; a guid
+#              reappearing in the manifest is the all-clear.
+# Stamps are read with source=local,received -- received survives pool
+# migrations and is per-dataset, so it cannot cloak (§17 corollary);
+# inherited values are still nothing. `zfs inherit` clears local AND
+# received (verified by suite).
+stamp_absent() {
     local now d sn g full pfx matched
     now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    local -a to_stamp=() to_clear=() rsl=()
-    declare -A stamped=()
+    local -a to_stamp=() to_clear=() dto_stamp=() dto_clear=() rsl=()
+    declare -A stamped=() dstamped=() man_in=()
+    for d in "${man_ds[@]}"; do
+        man_in[$d]=1
+    done
     while IFS=$'\t' read -r full g; do
         if [[ -n "$full" && "$g" != "-" ]]; then
             stamped[$full]=1
         fi
-    done < <(zfs get -H -r -s local -t snapshot -o name,value zfsrecvd:unknown-since "${dest_base}/${tree_root}" 2>/dev/null || true)
+    done < <(zfs get -H -r -s local,received -t snapshot -o name,value zfsrecvd:unknown-since "${dest_base}/${tree_root}" 2>/dev/null || true)
+    while IFS=$'\t' read -r full g; do
+        if [[ -n "$full" && "$g" != "-" ]]; then
+            dstamped[$full]=1
+        fi
+    done < <(zfs get -H -r -s local,received -t filesystem,volume -o name,value zfsrecvd:orphan-since "${dest_base}/${tree_root}" 2>/dev/null || true)
+    # dataset level: membership in the DS list alone (the manifest is
+    # complete by contract §5, guid entries or not)
+    for d in "${rds_order[@]}"; do
+        under_renamed "$d" && continue
+        full="${dest_base}/${d}"
+        if [[ -n "${man_in[$d]:-}" ]]; then
+            if [[ -n "${dstamped[$full]:-}" ]]; then
+                dto_clear+=( "$full" )
+            fi
+        elif [[ -z "${dstamped[$full]:-}" ]]; then
+            dto_stamp+=( "$full" )
+        fi
+    done
     for d in "${man_ds[@]}"; do
         [[ -n "${rhave[$d]:-}" ]] || continue
-        # same evidence rule as the collision pass: a bare manifest
-        # entry says nothing about the client's snapshots, and absence
-        # of evidence never starts a reclaim clock
+        # snapshot identity needs guid evidence: a bare manifest entry
+        # says nothing about the client's snapshots, and absence of
+        # evidence never starts a reclaim clock
         [[ -n "${man_gset[$d]:-}" ]] || continue
         under_renamed "$d" && continue
         IFS=, read -r -a rsl <<<"${rhave[$d]}"
@@ -621,6 +650,22 @@ stamp_unknown() {
             fi
         done
     done
+    if [[ ${#dto_stamp[@]} -gt 0 ]]; then
+        if ! zfs set "zfsrecvd:orphan-since=$now" "${dto_stamp[@]}" 2>/dev/null; then
+            for full in "${dto_stamp[@]}"; do
+                zfs set "zfsrecvd:orphan-since=$now" "$full" 2>/dev/null || true
+            done
+        fi
+        log "stamped ${#dto_stamp[@]} manifest-absent dataset(s) orphan-since=$now"
+    fi
+    if [[ ${#dto_clear[@]} -gt 0 ]]; then
+        if ! zfs inherit zfsrecvd:orphan-since "${dto_clear[@]}" 2>/dev/null; then
+            for full in "${dto_clear[@]}"; do
+                zfs inherit zfsrecvd:orphan-since "$full" 2>/dev/null || true
+            done
+        fi
+        log "cleared orphan-since on ${#dto_clear[@]} reappeared dataset(s)"
+    fi
     if [[ ${#to_stamp[@]} -gt 0 ]]; then
         if ! zfs set "zfsrecvd:unknown-since=$now" "${to_stamp[@]}" 2>/dev/null; then
             for full in "${to_stamp[@]}"; do
@@ -641,7 +686,7 @@ stamp_unknown() {
 
 do_endtree() {
     prune_tree
-    stamp_unknown
+    stamp_absent
     if [[ ${#received[@]} -gt 0 ]]; then
         local stamp
         stamp="zfsrecvd:last-recv=$(date -u +%Y-%m-%dT%H:%M:%SZ)"

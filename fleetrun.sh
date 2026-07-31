@@ -788,8 +788,8 @@ fi
 # way to use them is on the fleetrun command line, and env does not
 # cross ssh by itself (bit the owner's first grace-knob experiment).
 gcenv=""
-if [[ "${ZFSRECVD_GC_CAND_DAYS:-}" =~ ^[0-9]+$ ]]; then
-    gcenv+=" ZFSRECVD_GC_CAND_DAYS=${ZFSRECVD_GC_CAND_DAYS}"
+if [[ "${ZFSRECVD_GC_WARN_DAYS:-}" =~ ^[0-9]+$ ]]; then
+    gcenv+=" ZFSRECVD_GC_WARN_DAYS=${ZFSRECVD_GC_WARN_DAYS}"
 fi
 if [[ "${ZFSRECVD_GC_GRACE_DAYS:-}" =~ ^[0-9]+$ ]]; then
     gcenv+=" ZFSRECVD_GC_GRACE_DAYS=${ZFSRECVD_GC_GRACE_DAYS}"

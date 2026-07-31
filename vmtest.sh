@@ -178,8 +178,15 @@ check "T7 non-prefixed s1 survived on dest" sudo zfs list -H "$DEST@s1"
 
 echo "=== T8: multi-TREE control session + refusal, hand-driven ==="
 # bare DS lines (no guid entries) are legal 2.1: absence of evidence,
-# so the collision pass must leave everything alone
-{ printf 'zfsrecvd2.1\nTREE ztest/src zfsrecvd-2026-07-27-1080Z\nDS ztest/src\n\nSEND ztest/other - nope -\nENDTREE\nTREE ztest/src zfsrecvd-2026-07-27-1080Z\nDS ztest/src\n\nENDTREE\nBYE\n'; sleep 3; } \
+# so the collision pass and snapshot clocks leave everything alone.
+# The DS list itself must be COMPLETE (§5 contract) -- dataset-absence
+# clocks key on membership, so a partial manifest would start them.
+{ printf 'zfsrecvd2.1\nTREE ztest/src zfsrecvd-2026-07-27-1080Z\n'
+  sudo zfs list -H -r -t filesystem,volume -o name ztest/src | sed 's/^/DS /'
+  printf '\nSEND ztest/other - nope -\nENDTREE\nTREE ztest/src zfsrecvd-2026-07-27-1080Z\n'
+  sudo zfs list -H -r -t filesystem,volume -o name ztest/src | sed 's/^/DS /'
+  printf '\nENDTREE\nBYE\n'
+  sleep 3; } \
     | sudo openssl s_client -connect localhost:5299 -CAfile /etc/zfsrecvd/ca.pem \
         -cert /etc/zfsrecvd/client.pem -key /etc/zfsrecvd/client.key -quiet 2>/dev/null >/tmp/t8.log
 check "T8 greeting"        grep -q "OK zfsrecvd2.1" /tmp/t8.log
@@ -282,6 +289,32 @@ wb=$(grep -a "WIRE-BYTES:" /tmp/t13b.log | tail -n 1 | sed 's/.*WIRE-BYTES: //')
 if [ -n "$wb" ] && [ "$wb" -gt 0 ] 2>/dev/null; then ok "T15 wire bytes counted ($wb)"; else bad "T15 wire bytes (got '$wb')"; cat /tmp/t13b.log; fi
 sudo /etc/zfsrecvd/sendtree.sh ztest/src localhost >/tmp/t15.log 2>&1 || bad "T15 up-to-date run failed"
 grep -q "WIRE-BYTES: 0" /tmp/t15.log && ok "T15 up-to-date run counts zero" || { bad "T15 zero"; grep -a "WIRE-BYTES" /tmp/t15.log; }
+
+echo "=== T16: manifest-driven orphan clocks + received-source stamps ==="
+# the .gone trees from T12/T13 are absent from every manifest; T15's
+# whole-tree run must have started their clocks
+gds=$(sudo zfs list -H -o name | grep "^$DEST/d\.gone-" | head -n 1)
+os=$(sudo zfs get -H -s local -o value zfsrecvd:orphan-since "$gds" 2>/dev/null)
+if [ -n "$os" ] && [ "$os" != "-" ]; then ok "T16 renamed-aside tree clocked"; else bad "T16 .gone unclocked (got '$os')"; fi
+# reappearance clears: stamp a live dataset, run, the clock must be gone
+sudo zfs set zfsrecvd:orphan-since=2026-01-01T00:00:00Z "$DEST/b"
+sudo /etc/zfsrecvd/sendtree.sh ztest/src localhost >/tmp/t16.log 2>&1 || bad "T16 run failed"
+os2=$(sudo zfs get -H -s local,received -o value zfsrecvd:orphan-since "$DEST/b" 2>/dev/null)
+if [ -z "$os2" ] || [ "$os2" = "-" ]; then ok "T16 reappearance cleared the clock"; else bad "T16 clock survived ($os2)"; fi
+# received-source mechanics (§17 corollary): a stamp that crossed a
+# send/recv reads as source=received and must still count -- and plain
+# `zfs inherit` must clear it, not resurrect it
+sudo zfs create ztest/rcvsrc
+sudo zfs set zfsrecvd:orphan-since=2026-02-02T00:00:00Z ztest/rcvsrc
+sudo zfs snapshot ztest/rcvsrc@p
+sudo sh -c 'zfs send -p ztest/rcvsrc@p | zfs recv ztest/rcvdst'
+rsrc=$(sudo zfs get -H -o source zfsrecvd:orphan-since ztest/rcvdst)
+check "T16 stamp crossed as received (got $rsrc)" test "$rsrc" = "received"
+rv=$(sudo zfs get -H -s local,received -o value zfsrecvd:orphan-since ztest/rcvdst)
+check "T16 received stamp readable via -s local,received" test "$rv" = "2026-02-02T00:00:00Z"
+sudo zfs inherit zfsrecvd:orphan-since ztest/rcvdst
+rv2=$(sudo zfs get -H -s local,received -o value zfsrecvd:orphan-since ztest/rcvdst 2>/dev/null)
+if [ -z "$rv2" ] || [ "$rv2" = "-" ]; then ok "T16 inherit clears received (no resurrection)"; else bad "T16 inherit left '$rv2'"; fi
 
 echo
 echo "=== RESULT: $PASS passed, $FAIL failed ==="

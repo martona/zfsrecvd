@@ -276,32 +276,39 @@ grep -q "(cursor catch-up)" /tmp/fleet9.log && ok "T14 cursor path taken" || { b
 new_src=$(sudo zfs list -H -t snapshot -d 1 -o name ztest/src | tail -n 1); new_src="${new_src#*@}"
 sudo zfs list -H -t snapshot -d 1 -o name "$DEST" | grep -q "@$new_src\$" && ok "T14 catch-up landed on dest" || bad "T14 dest missing $new_src"
 
-echo "=== T15: orphan GC, warn-only ==="
+echo "=== T15: orphan GC, warn-only (server owns clocks; gc renders phases) ==="
 sudo zfs create ztest/recv/$CN/oldcrap
 sudo zfs create ztest/recv/$CN/stale
-sudo zfs set zfsrecvd:last-recv=2026-01-01T00:00:00Z ztest/recv/$CN/stale
+# canaries sit at CN level, OUTSIDE any session tree -- no run touches
+# their clocks, so a manual orphan-since stands in for a server stamp
+sudo zfs set "zfsrecvd:orphan-since=$(date -u +%Y-%m-%dT%H:%M:%SZ)" ztest/recv/$CN/stale
 # deep unstamped child under a STAMPED parent: inherited properties must
-# not cloak it (the owner's no-such-zvol find)
+# not cloak it (the owner's no-such-zvol find). It gets a snapshot so it
+# enters the server's state model -- SNAPLESS datasets are outside it
+# (§5) and stay in the UNSTAMPED listing instead of being clocked.
 sudo zfs create "$DEST/deepcrap"
+sudo zfs snapshot "$DEST/deepcrap@junk"
 out=$(sudo env ZFSRECVD_CONF=/etc/zfsrecvd/zfsrecvd.conf /etc/zfsrecvd/gc.sh 2>&1)
 grep -q "oldcrap: UNSTAMPED" <<<"$out" && ok "T15 unstamped crap surfaced" || { bad "T15 unstamped"; echo "$out"; }
 grep -q "deepcrap: UNSTAMPED" <<<"$out" && ok "T15 deep unstamped not cloaked by inheritance" || { bad "T15 deepcrap"; echo "$out"; }
-grep -q "stale: ORPHAN CANDIDATE" <<<"$out" && ok "T15 stale flagged" || { bad "T15 stale"; echo "$out"; }
 grep -q "/ztest: UNSTAMPED" <<<"$out" && bad "T15 container noise" || ok "T15 containers stay quiet"
-osv=$(sudo zfs get -H -o value zfsrecvd:orphan-since ztest/recv/$CN/stale)
-check "T15 orphan-since stamped (got $osv)" test "$osv" != "-"
-out2=$(sudo env ZFSRECVD_CONF=/etc/zfsrecvd/zfsrecvd.conf /etc/zfsrecvd/gc.sh 2>&1)
-grep -q "eligible in" <<<"$out2" && ok "T15 countdown on second pass" || { bad "T15 countdown"; echo "$out2"; }
-grep -q "datasets, newest recv" <<<"$out2" && ok "T15 noisy CN gets its summary line" || { bad "T15 summary"; echo "$out2"; }
+grep -q "stale: ABSENT AT SOURCE" <<<"$out" && bad "T15 warned inside the quiet window" || ok "T15 day-0 clock quiet on console"
+grep -q "GC-TRACK: ztest/recv/$CN/stale: orphan-since" <<<"$out" && ok "T15 clock tracked from day 0" || { bad "T15 track"; echo "$out"; }
+out2=$(sudo env ZFSRECVD_GC_WARN_DAYS=0 ZFSRECVD_CONF=/etc/zfsrecvd/zfsrecvd.conf /etc/zfsrecvd/gc.sh 2>&1)
+grep -q "stale: ABSENT AT SOURCE -- since .*eligible for reclaim in" <<<"$out2" && ok "T15 warn knob brings the click forward" || { bad "T15 warn knob"; echo "$out2"; }
+grep -q "datasets, newest recv" <<<"$out2" && ok "T15 warned CN gets its summary line" || { bad "T15 summary"; echo "$out2"; }
 out3=$(sudo env ZFSRECVD_GC_GRACE_DAYS=0 ZFSRECVD_CONF=/etc/zfsrecvd/zfsrecvd.conf /etc/zfsrecvd/gc.sh 2>&1)
 grep -q "stale: RECLAIM-ELIGIBLE" <<<"$out3" && ok "T15 grace knob turns down" || { bad "T15 knob"; echo "$out3"; }
 check "T15 nothing destroyed" sudo zfs list -H ztest/recv/$CN/oldcrap ztest/recv/$CN/stale
 
 echo "=== T16: GC knobs forward through fleetrun over ssh ==="
-ZFSRECVD_GC_CAND_DAYS=0 ZFSRECVD_GC_GRACE_DAYS=0 /etc/zfsrecvd/fleetrun.sh -c ~/fleet-test.conf >/tmp/fleet10.log 2>&1
+ZFSRECVD_GC_WARN_DAYS=0 ZFSRECVD_GC_GRACE_DAYS=0 /etc/zfsrecvd/fleetrun.sh -c ~/fleet-test.conf >/tmp/fleet10.log 2>&1
 rc=$?
 check "T16 rc=0" test "$rc" -eq 0
-grep -q "eligible for reclaim in 0d" /tmp/fleet10.log && ok "T16 knobs reached the receiver" || { bad "T16 knobs"; grep -a "GC:" /tmp/fleet10.log | head -n 8; }
+grep -q "stale: RECLAIM-ELIGIBLE" /tmp/fleet10.log && ok "T16 knobs reached the receiver" || { bad "T16 knobs"; grep -a "GC:" /tmp/fleet10.log | head -n 8; }
+# the run itself must have clocked the in-tree manifest-absent canary
+dos=$(sudo zfs get -H -s local -o value zfsrecvd:orphan-since "$DEST/deepcrap" 2>/dev/null)
+if [ -n "$dos" ] && [ "$dos" != "-" ]; then ok "T16 manifest-absent dataset clocked by the run"; else bad "T16 deepcrap unclocked (got '$dos')"; fi
 
 echo "=== T17: ec2 cadence: fresh destinations skip; --force-ec2 overrides ==="
 # T16's run just succeeded for both receivers, so the ledger is fresh.

@@ -178,19 +178,22 @@ declare -A lpairs                    # dataset -> "snap:guid,..." same order (2.
 declare -A bpairs                    # dataset -> "#bookmark:guid,..." cursor lineage evidence
 declare -A encroot encon             # encryptionroot / encryption per dataset
 
+# The manifest always describes the FULL source tree (it is the
+# informational truth the server's absence clocks key on, §5/§15b);
+# --single only restricts what gets PLANNED AND SENT. A root-only
+# manifest would make the server clock every receiver-side child as
+# absent-at-source.
 while IFS=$'\t' read -r name typ; do
     datasets+=( "$name" )
     dstype[$name]="$typ"
-done < <(
-    if [[ -n "$single" ]]; then
-        zfs list -H -t filesystem,volume -o name,type "$root"
-    else
-        zfs list -H -r -t filesystem,volume -o name,type "$root"
-    fi
-)
+done < <(zfs list -H -r -t filesystem,volume -o name,type "$root")
 if [[ ${#datasets[@]} -eq 0 ]]; then
     echo "ERROR: no such dataset: $root" >&2
     exit 2
+fi
+sendsets=( "${datasets[@]}" )        # what the planner walks
+if [[ -n "$single" ]]; then
+    sendsets=( "$root" )
 fi
 
 while IFS=$'\t' read -r s gd; do
@@ -198,13 +201,7 @@ while IFS=$'\t' read -r s gd; do
     sn="${s#*@}"
     lsnaps[$ds]="${lsnaps[$ds]:-}${lsnaps[$ds]:+,}$sn"
     lpairs[$ds]="${lpairs[$ds]:-}${lpairs[$ds]:+,}$sn:$gd"
-done < <(
-    if [[ -n "$single" ]]; then
-        zfs list -H -t snapshot -s creation -d 1 -o name,guid "$root"
-    else
-        zfs list -H -r -t snapshot -s creation -o name,guid "$root"
-    fi
-)
+done < <(zfs list -H -r -t snapshot -s creation -o name,guid "$root")
 
 # Replication cursors as manifest entries (2.1): every zfsrecvd-* bookmark
 # regardless of destination -- each one is lineage evidence for the
@@ -217,13 +214,7 @@ while IFS=$'\t' read -r b gd; do
     [[ "$b" == *#zfsrecvd-* ]] || continue
     ds="${b%%#*}"
     bpairs[$ds]="${bpairs[$ds]:-}${bpairs[$ds]:+,}#${b#*#}:$gd"
-done < <(
-    if [[ -n "$single" ]]; then
-        zfs list -H -t bookmark -d 1 -o name,guid "$root" 2>/dev/null
-    else
-        zfs list -H -r -t bookmark -o name,guid "$root" 2>/dev/null
-    fi || true
-)
+done < <(zfs list -H -r -t bookmark -o name,guid "$root" 2>/dev/null || true)
 
 while IFS=$'\t' read -r name prop val; do
     case "$prop" in
@@ -708,7 +699,7 @@ ever_connected=""
 
 while true; do
     pending=()
-    for ds in "${datasets[@]}"; do
+    for ds in "${sendsets[@]}"; do
         if [[ -z "${done_ds[$ds]:-}" ]]; then
             pending+=( "$ds" )
         fi
@@ -748,7 +739,7 @@ while true; do
         sleep 2
         continue
     fi
-    echo "tree [$root@$target]${dest_tag}: ${#datasets[@]} datasets local, ${#have[@]} known to receiver" >&2
+    echo "tree [$root@$target]${dest_tag}: ${#sendsets[@]} datasets local, ${#have[@]} known to receiver" >&2
 
     progress=0               # datasets settled this session (resets strikes)
     session_dead=""
@@ -803,7 +794,7 @@ while true; do
 done
 
 # Anything the retry loop never got to counts as failed.
-for ds in "${datasets[@]}"; do
+for ds in "${sendsets[@]}"; do
     if [[ -z "${done_ds[$ds]:-}" ]]; then
         failed+=( "$ds (unsent)" )
     fi
