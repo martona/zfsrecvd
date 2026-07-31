@@ -18,7 +18,7 @@ cat > "$FX/runs.jsonl" <<'EOF'
 {"ts":"2026-07-30T01:00:40Z","snap":"","src":"jup","tree":"tank/c","dst":"ec2","state":"cadence","rc":"0","why":"last ok 2026-07-29T20:00:00Z (cadence 24h)","failed_ds":"","secs":0}
 {"ts":"2026-07-30T01:00:41Z","snap":"","src":"vbox","tree":"tank/d","dst":"ec2","state":"cadence","rc":"0","why":"source unreachable; cadence window not consulted","failed_ds":"","secs":0}
 {"ts":"2026-07-30T01:00:42Z","snap":"","src":"jup","tree":"tank/e","dst":"ec2","state":"cadence","rc":"0","why":"skipped by --skip-ec2","failed_ds":"","secs":0}
-{"ts":"2026-07-30T01:01:00Z","kind":"run","run":"run-B","rc":2,"recv":[{"id":"berg","before":2024,"after":4072,"avail":4990000,"pruned":512},{"id":"cp4","before":800,"after":800,"avail":900000,"pruned":0}],"src":[{"id":"jup","tree":"tank/a","used":200000,"avail":700000}],"gc":[{"id":"berg","gc":"tank/recv/x/gone: ORPHAN CANDIDATE -- 42d behind siblings; eligible in 48d"},{"id":"cp4","gc":"all quiet: 1 client(s), 3 datasets, everything fresh"}]}
+{"ts":"2026-07-30T01:01:00Z","kind":"run","run":"run-B","rc":2,"recv":[{"id":"berg","before":2024,"after":4072,"avail":4990000,"pruned":512},{"id":"cp4","before":800,"after":800,"avail":900000,"pruned":0}],"src":[{"id":"jup","tree":"tank/a","used":200000,"avail":700000}],"gc":[{"id":"berg","gc":"tank/recv/x/gone: ORPHAN CANDIDATE -- 42d behind siblings; eligible in 48d"},{"id":"berg","gc":"track tank/recv/x/dev@codex: unknown-since 2026-07-30T00:00:00Z; eligible in 89d"},{"id":"cp4","gc":"all quiet: 1 client(s), 3 datasets, everything fresh"}]}
 EOF
 
 out=$(bash "$HERE/report.sh" -f "$FX/runs.jsonl" 2>&1)
@@ -40,6 +40,9 @@ grep -qx "  source  tree      used   avail" <<<"$out" && ok "source table header
 grep -qx "  jup     tank/a  195.3K  683.6K" <<<"$out" && ok "source row aligned" || bad "src row: $out"
 grep -q "gc \[berg\] tank/recv/x/gone: ORPHAN CANDIDATE" <<<"$out" && ok "gc warning rendered" || bad "gc warn: $out"
 grep -q "gc \[cp4\] all quiet: 1 client(s)" <<<"$out" && ok "gc all-quiet rendered" || bad "gc quiet: $out"
+grep -q "@codex" <<<"$out" && bad "gc track entry shown without --gc-debug" || ok "gc track hidden by default"
+outg=$(bash "$HERE/report.sh" --gc-debug -f "$FX/runs.jsonl" 2>&1)
+grep -q "gc \[berg\] track tank/recv/x/dev@codex: unknown-since" <<<"$outg" && ok "--gc-debug surfaces track inventory" || bad "gc-debug: $outg"
 grep -q "trend (last 2 run(s))" <<<"$out" && ok "trend window" || bad "trend hdr: $out"
 grep -qx "  berg      3.0K    612B" <<<"$out" && ok "trend sums aligned (berg)" || bad "trend berg: $out"
 grep -qx "  cp4       300B      0B" <<<"$out" && ok "trend sums aligned (cp4)" || bad "trend cp4: $out"

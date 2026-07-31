@@ -8,11 +8,13 @@ set -euo pipefail
 
 n=10
 f=""
+gcdbg=0
 while (( $# > 0 )); do
     case "$1" in
         -n) n="${2:?}"; shift 2 ;;
         -f) f="${2:?}"; shift 2 ;;
-        *)  echo "usage: report.sh [-n runs] [-f runs.jsonl]" >&2; exit 64 ;;
+        --gc-debug) gcdbg=1; shift ;;   # also render gc "track" inventory
+        *)  echo "usage: report.sh [-n runs] [-f runs.jsonl] [--gc-debug]" >&2; exit 64 ;;
     esac
 done
 if [[ -z "$f" ]]; then
@@ -25,7 +27,7 @@ if [[ -z "$f" || ! -s "$f" ]]; then
     exit 1
 fi
 
-awk -v NRUNS="$n" '
+awk -v NRUNS="$n" -v GCDBG="$gcdbg" '
 function g(s, k,   m) {
     m = ""
     if (match(s, "\"" k "\":\"[^\"]*\"")) {
@@ -134,9 +136,16 @@ END {
         gn++
         gid[gn] = g(rec, "id"); gtxt[gn] = g(rec, "gc")
     }
-    if (gn > 0) {
+    # "track" entries are the clocked-item inventory (not warnings);
+    # hidden unless --gc-debug asked for them
+    gshow = 0
+    for (i = 1; i <= gn; i++) if (GCDBG || gtxt[i] !~ /^track /) gshow++
+    if (gshow > 0) {
         print ""
-        for (i = 1; i <= gn; i++) printf "  gc [%s] %s\n", gid[i], gtxt[i]
+        for (i = 1; i <= gn; i++) {
+            if (!GCDBG && gtxt[i] ~ /^track /) continue
+            printf "  gc [%s] %s\n", gid[i], gtxt[i]
+        }
     }
 
     # trend: per-receiver sums over the window, first-seen order

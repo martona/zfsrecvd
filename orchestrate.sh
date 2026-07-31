@@ -350,15 +350,9 @@ run_pool() {   # $1 = live | plain
 
     if [[ "$mode" == "live" ]]; then
         tput cnorm 2>/dev/null || true
-        # Receiver-only snapshot NOTEs are summary-class: reprint them
-        # here, before the logs that carry them are discarded on success
-        # (owner found a deleted-at-source snap that a clean interactive
-        # run never mentioned).
-        local ro_lines
-        ro_lines=$(grep -ah "receiver-only snapshots" "$logdir"/*.log 2>/dev/null | sed -e 's/\r$//' | sort -u || true)
-        if [[ -n "$ro_lines" ]]; then
-            printf '%s\n' "$ro_lines" >&2
-        fi
+        # (The receiver-only-snapshot NOTE reprint lived here until
+        # 2026-07-31 -- retired with the NOTE itself; unknown-since
+        # stamps + gc tracking carry that signal now.)
         # keep the logs if anything went sideways, and show the tails
         local any_bad=0
         for (( i = 0; i < njobs; i++ )); do

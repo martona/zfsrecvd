@@ -33,6 +33,13 @@ GRACE_DAYS="${ZFSRECVD_GC_GRACE_DAYS:-90}"  # observation -> eligible
 
 now=$(date -u +%s)
 say() { echo "GC:   $*"; }
+# Track lines are INVENTORY, not warnings: every item carrying a reclaim
+# clock (orphan-since dataset, unknown-since snapshot), ripe or not,
+# every run. fleetrun keeps them off the console and harvests them into
+# the run record; report.sh renders them only under --gc-debug
+# (owner 2026-07-31). A direct gc.sh invocation prints them plainly --
+# that IS the debug view.
+track() { echo "GC-TRACK: $*"; }
 quiet_cns=0
 quiet_ds=0
 
@@ -99,13 +106,16 @@ while IFS= read -r cnroot; do
                 stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
                 zfs set "zfsrecvd:orphan-since=$stamp" "$ds" 2>/dev/null || true
                 say "$ds: ORPHAN CANDIDATE -- ${behind}d behind siblings; eligible for reclaim in ${GRACE_DAYS}d (warn-only build, nothing is destroyed)"
+                track "$ds: orphan-since $stamp; eligible in ${GRACE_DAYS}d"
             else
                 oe=$(date -u -d "${osince[$ds]}" +%s 2>/dev/null) || oe=$now
                 left=$(( GRACE_DAYS - (now - oe) / 86400 ))
                 if (( left > 0 )); then
                     say "$ds: ORPHAN CANDIDATE -- ${behind}d behind siblings; eligible in ${left}d"
+                    track "$ds: orphan-since ${osince[$ds]}; eligible in ${left}d"
                 else
                     say "$ds: RECLAIM-ELIGIBLE -- ${behind}d behind siblings; grace expired (warn-only build, NOT destroyed)"
+                    track "$ds: orphan-since ${osince[$ds]}; grace expired"
                 fi
             fi
         elif [[ -n "${osince[$ds]:-}" ]]; then
@@ -113,6 +123,21 @@ while IFS= read -r cnroot; do
             say "$ds: recovered -- receiving again; orphan clock cleared"
         fi
     done
+    # tracked receiver-only snapshots: unknown-since stamps set by the
+    # 2.1 receiver at ENDTREE (PROTOCOL.md §15b). GC owns their
+    # inventory; they never trigger the CN summary (their time has not
+    # come -- owner 2026-07-31) and never warn in this build.
+    while IFS=$'\t' read -r sn val; do
+        [[ -n "$sn" && "$val" != "-" ]] || continue
+        ue=$(date -u -d "$val" +%s 2>/dev/null) || ue=$now
+        uleft=$(( GRACE_DAYS - (now - ue) / 86400 ))
+        if (( uleft > 0 )); then
+            track "$sn: unknown-since $val; eligible in ${uleft}d"
+        else
+            track "$sn: unknown-since $val; grace expired (warn-only build, NOT destroyed)"
+        fi
+    done < <(zfs get -H -r -s local -t snapshot -o name,value zfsrecvd:unknown-since "$cnroot" 2>/dev/null || true)
+
     # client summary: per-CN line only when there is something to say
     # (owner: all-zero lines "elevate to noise"); healthy CNs roll up
     # into one all-quiet line at the end.

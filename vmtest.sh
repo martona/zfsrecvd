@@ -215,7 +215,7 @@ us=$(sudo zfs get -H -s local -o value zfsrecvd:unknown-since "$DEST/b@recvonly"
 if [ -n "$us" ] && [ "$us" != "-" ]; then ok "T11 receiver-only snap stamped ($us)"; else bad "T11 stamp missing (got '$us')"; fi
 us2=$(sudo zfs get -H -s local -o value zfsrecvd:unknown-since "$DEST/b@s2" 2>/dev/null)
 if [ -z "$us2" ] || [ "$us2" = "-" ]; then ok "T11 reappeared snap cleared"; else bad "T11 stale stamp survived ($us2)"; fi
-grep -q "receiver-only snapshots" /tmp/t11.log && ok "T11 sender NOTE still emitted" || bad "T11 sender NOTE"
+grep -q "receiver-only snapshots" /tmp/t11.log && bad "T11 retired NOTE still prints" || ok "T11 NOTE retired (stamps track it now)"
 # prefix snaps are the grid's business: none may carry a stamp
 pn=$(sudo zfs get -H -r -s local -t snapshot -o name,value zfsrecvd:unknown-since "$DEST" | grep -c "@zfsrecvd-") || pn=0
 check "T11 no prefix snap stamped (got $pn)" test "$pn" -eq 0

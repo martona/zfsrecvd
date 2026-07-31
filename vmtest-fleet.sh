@@ -232,7 +232,10 @@ check "T12 dest thinned ($pre -> $post)" test "$post" -lt "$pre"
 check "T12 yesterday's fakes culled" bash -c "! sudo zfs list -H -t snapshot -d 1 -o name $DEST | grep -q 2026-07-28-0"
 check "T12 frontier survived (got $post)" test "$post" -ge 1
 check "T12 manual snap untouched by grid" sudo zfs list -H "$DEST@keepme-manual"
-grep -q "receiver-only snapshots.*@keepme-manual" /tmp/fleet8.log && ok "T12 receiver-only snap reported" || { bad "T12 receiver-only note"; grep -a "receiver-only" /tmp/fleet8.log; }
+grep -q "receiver-only snapshots" /tmp/fleet8.log && bad "T12 retired NOTE still prints" || ok "T12 receiver-only NOTE retired"
+us=$(sudo zfs get -H -s local -o value zfsrecvd:unknown-since "$DEST@keepme-manual" 2>/dev/null)
+if [ -n "$us" ] && [ "$us" != "-" ]; then ok "T12 manual snap stamped unknown-since"; else bad "T12 stamp missing (got '$us')"; fi
+grep -q "^GC-TRACK: " /tmp/fleet8.log && bad "T12 track lines leaked to console" || ok "T12 track lines off the console"
 grep -q "gc: \[vmrecv\]" /tmp/fleet8.log && ok "T12 gc stage ran" || { bad "T12 gc stage"; tail -n 20 /tmp/fleet8.log; }
 RJ="${XDG_STATE_HOME:-$HOME/.local/state}/zfsrecvd/runs.jsonl"
 check "T12 runs.jsonl written" test -s "$RJ"
@@ -243,8 +246,12 @@ grep -q "\"kind\":\"run\"" "$RJ" && ok "T12 jsonl run record" || { bad "T12 run 
 grep -q "GC:   all quiet:" /tmp/fleet8.log && ok "T12 gc all-quiet rollup" || { bad "T12 rollup"; grep -a "GC:" /tmp/fleet8.log | head -n 5; }
 grep -qF '","gc":"' "$RJ" && ok "T12 gc harvested into jsonl" || { bad "T12 gc jsonl"; tail -n 1 "$RJ"; }
 grep -qF "{\"id\":\"$CN\",\"tree\":\"ztest/src\"" "$RJ" && ok "T12 jsonl source space data" || { bad "T12 src data"; tail -n 1 "$RJ"; }
+grep -qF '"gc":"track ' "$RJ" && ok "T12 track inventory in jsonl" || { bad "T12 track jsonl"; tail -n 1 "$RJ"; }
 rout=$(/etc/zfsrecvd/report.sh 2>/dev/null)
 grep -q "last run: run-" <<<"$rout" && ok "T12 report.sh renders" || { bad "T12 report.sh"; /etc/zfsrecvd/report.sh 2>&1 | head -n 5; }
+grep -q "track .*@keepme-manual" <<<"$rout" && bad "T12 track shown without --gc-debug" || ok "T12 track hidden by default"
+rdbg=$(/etc/zfsrecvd/report.sh --gc-debug 2>/dev/null)
+grep -q "gc \[vmrecv\] track .*@keepme-manual: unknown-since" <<<"$rdbg" && ok "T12 --gc-debug surfaces the inventory" || { bad "T12 gc-debug"; grep "gc \[" <<<"$rdbg" | head -n 6; }
 grep -qE "^  receiver +net +pruned +avail$" <<<"$rout" && ok "T12 report.sh receiver table" || { bad "T12 recv table"; echo "$rout" | head -n 12; }
 grep -q "  gc \[" <<<"$rout" && ok "T12 report.sh gc section" || { bad "T12 gc section"; echo "$rout" | head -n 20; }
 grep -q "pruned: \[vmrecv\] .*@zfsrecvd-2026-07-28-0800Z" /tmp/fleet8.log && ok "T12 SHOW_PRUNES names the destroyed" || { bad "T12 show prunes"; grep -a "pruned:" /tmp/fleet8.log | head -n 5; }

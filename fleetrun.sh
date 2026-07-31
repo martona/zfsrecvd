@@ -809,9 +809,16 @@ for h in "${fleet_receivers[@]}"; do
         echo "WARNING: gc pass failed on [$h]" >&2
     fi
     if [[ -n "$gout" ]]; then
-        printf '%s\n' "$gout" >&2
+        # GC-TRACK lines are inventory (clocked items, ripe or not), not
+        # warnings: jsonl-only, surfaced by report.sh --gc-debug -- the
+        # console keeps every WARNING line in every mode, as before
+        grep -v '^GC-TRACK: ' <<<"$gout" >&2 || true
         while IFS= read -r gl; do
-            gl="${gl#GC:   }"
+            if [[ "$gl" == "GC-TRACK: "* ]]; then
+                gl="track ${gl#GC-TRACK: }"
+            else
+                gl="${gl#GC:   }"
+            fi
             if [[ -z "$gl" ]]; then
                 continue
             fi
