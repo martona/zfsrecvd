@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# zfsrecvd protocol 2.0/2.1 sender: replicates a dataset tree over one TLS
-# session. See PROTOCOL.md for the wire contract. Speaks 2.1 (manifest
-# snapshot+cursor guids, guid-veto replanning, received-bytes) and
-# restricts itself to 2.0 when the receiver's greeting says so.
+# zfsrecvd protocol 2.1 sender: replicates a dataset tree over one TLS
+# session. See PROTOCOL.md for the wire contract. 2.1 only (manifest
+# snapshot+cursor guids, guid-veto replanning, received-bytes); a peer
+# greeting anything else is a config error and fails clean.
 #
 # Usage: sendtree.sh [--single] [--no-prune] <dataset[@snap]> <remote_host>
 #        sendtree.sh --prune-only <dataset>
@@ -382,15 +382,12 @@ connect_session() {
     printf 'zfsrecvd2.1\n' >&"$OUT" 2>/dev/null || { close_session; return 1; }
     local g
     IFS= read -r -t 15 -u "$IN" g || { close_session; return 1; }
-    case "$g" in
-        "OK zfsrecvd2.1") session_minor=1 ;;
-        "OK zfsrecvd2.0") session_minor=0 ;;   # older receiver: restrict to 2.0
-        *)
-            echo "ERROR: unexpected greeting from [$remote]: $g" >&2
-            close_session
-            return 1 ;;
-    esac
-    echo "connected to [$remote] (zfsrecvd2.$session_minor${tunnel_port[$remote]:+, haproxy tunnel})" >&2
+    if [[ "$g" != "OK zfsrecvd2.1" ]]; then
+        echo "ERROR: unexpected greeting from [$remote]: $g" >&2
+        close_session
+        return 1
+    fi
+    echo "connected to [$remote] (zfsrecvd2.1${tunnel_port[$remote]:+, haproxy tunnel})" >&2
     return 0
 }
 
@@ -399,23 +396,18 @@ connect_session() {
 # treats that as a dead session.
 declare -A have              # dataset -> receiver's snaps, comma-joined, oldest first
 declare -A token             # dataset -> receiver's pending resume token
-session_minor=0              # set by connect_session from the greeting
 send_tree_block() {
     {
         printf 'TREE %s %s\n' "$root" "$target"
         local d ent
         for d in "${datasets[@]}"; do
-            if (( session_minor >= 1 )); then
-                # 2.1 manifest: snapshot guids + cursor bookmark guids
-                ent="${lpairs[$d]:-}"
-                if [[ -n "${bpairs[$d]:-}" ]]; then
-                    ent="${ent}${ent:+,}${bpairs[$d]}"
-                fi
-                if [[ -n "$ent" ]]; then
-                    printf 'DS %s %s\n' "$d" "$ent"
-                else
-                    printf 'DS %s\n' "$d"
-                fi
+            # manifest entries: snapshot guids + cursor bookmark guids
+            ent="${lpairs[$d]:-}"
+            if [[ -n "${bpairs[$d]:-}" ]]; then
+                ent="${ent}${ent:+,}${bpairs[$d]}"
+            fi
+            if [[ -n "$ent" ]]; then
+                printf 'DS %s %s\n' "$d" "$ent"
             else
                 printf 'DS %s\n' "$d"
             fi
@@ -491,8 +483,8 @@ xfer() {
     case "$reply" in
         OK\ *)
             sent_n=$(( sent_n + 1 ))
-            # 2.1 result lines carry the receiver's byte count ("-" when
-            # it could not tell); 2.0 lines have no third field.
+            # result lines carry the receiver's byte count ("-" when it
+            # could not tell)
             local okb
             read -r _ _ okb _ <<<"$reply"
             if [[ "${okb:-}" =~ ^[0-9]+$ ]]; then
@@ -849,8 +841,8 @@ if [[ -z "$no_prune" ]]; then
 fi
 
 echo "Tree [$root@$target]${dest_tag}: $sent_n sent, $utd_n up to date, $skip_n skipped, ${#failed[@]} failed" >&2
-# machine-readable receiver-side byte count (2.1 OK lines; 0 on a 2.0
-# session or an all-up-to-date run) -- orchestrate harvests it per job
+# machine-readable receiver-side byte count (0 on an all-up-to-date
+# run) -- orchestrate harvests it per job
 echo "WIRE-BYTES: $wire_bytes" >&2
 if [[ ${#failed[@]} -gt 0 ]]; then
     echo "Failed datasets for [$remote]:" >&2

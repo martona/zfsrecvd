@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# zfsrecvd protocol 2.0/2.1 receiver. socat (see listen.sh) spawns one
+# zfsrecvd protocol 2.1 receiver. socat (see listen.sh) spawns one
 # instance per TLS connection; stdin/stdout are the socket, stderr goes to
 # the journal.
 #
@@ -7,7 +7,9 @@
 # cursor-bookmark GUIDs; everything GUID-aware happens HERE, server-side --
 # rename-aside of replaced lineages, the incremental-base guid veto,
 # unknown-since stamping of receiver-only snapshots, received-bytes on the
-# OK line. A 2.0 client gets byte-identical 2.0 behavior.
+# OK line. There is no 2.0 handler (owner decision, same doctrine as
+# dropping 1.1): the fleet ships scripts per run, so a version-mismatched
+# peer is a config error that fails clean at the greeting.
 #
 # A connection is one *session*: any number of sequential TREE exchanges,
 # each being a client manifest, our state dump back, a series of
@@ -78,20 +80,18 @@ log "session from: $safe_cn"
 #
 # ---- 2. version sanity check ------------------------------------------------
 #
-# The fleet upgrades in one deploy, so this is a sanity check rather than a
-# negotiation: any 2.x client is answered with min(its version, ours) --
-# a 2.0 client gets a byte-identical 2.0 session, a 2.1+ client gets 2.1.
-# Everything else is logged and dropped.
+# The fleet upgrades in one deploy, so this is a sanity check rather than
+# a negotiation: any 2.x hello is answered with the one version we speak
+# (2.1); a stale client fails clean at the greeting, exactly like 1.1
+# before it (owner decision 2026-07-31: no 2.0 handler -- there is no
+# mixed-version fleet, and rollback is redeploying the previous commit,
+# both sides together).
 IFS= read -r -t 30 hello || { log "ERROR: no version line"; exit 1; }
-if ! [[ "$hello" =~ ^zfsrecvd2\.([0-9]+)$ ]]; then
+if ! [[ "$hello" =~ ^zfsrecvd2\.[0-9]+$ ]]; then
     log "ERROR: unsupported version '$hello'"
     exit 1
 fi
-proto_minor=1
-if (( BASH_REMATCH[1] < proto_minor )); then
-    proto_minor=${BASH_REMATCH[1]}
-fi
-out "OK zfsrecvd2.$proto_minor"
+out "OK zfsrecvd2.1"
 
 #
 # ---- session state ----------------------------------------------------------
@@ -318,10 +318,10 @@ do_send() {
         log "refused SEND $ds (outside $tree_root)"
         return 0
     fi
-    # 2.1 GUID guardrails (PROTOCOL.md §15b), both before GO so the
+    # GUID guardrails (PROTOCOL.md §15b), both before GO so the
     # session survives. Datasets received THIS session are exempt: their
     # bases were just written by us and are not in the TREE-time state.
-    if (( proto_minor >= 1 )) && [[ -z "${sess_recvd[$ds]:-}" ]]; then
+    if [[ -z "${sess_recvd[$ds]:-}" ]]; then
         if [[ "$from" != "-" ]]; then
             # Plan-time veto: an incremental whose base name we hold but
             # whose lineage the client does not share would die
@@ -399,23 +399,15 @@ do_send() {
     errf=$(mktemp)
     vf=$(mktemp)
     set +e
-    if (( proto_minor >= 1 )); then
-        # -v prints its summary to STDOUT -- which is the socket here.
-        # The redirect is load-bearing, not cosmetic.
-        zfs recv -s -u -v -F -e -x canmount "$parent" >"$vf" 2>"$errf"
-    else
-        zfs recv -s -u -F -e -x canmount "$parent" 2>"$errf"
-    fi
+    # -v prints its summary to STDOUT -- which is the socket here.
+    # The redirect is load-bearing, not cosmetic.
+    zfs recv -s -u -v -F -e -x canmount "$parent" >"$vf" 2>"$errf"
     rc=$?
     set -e
     if (( rc == 0 )); then
         bytes=$(recv_bytes "$vf")
         rm -f -- "$errf" "$vf"
-        if (( proto_minor >= 1 )); then
-            out "OK $ds ${bytes:--}"
-        else
-            out "OK $ds"
-        fi
+        out "OK $ds ${bytes:--}"
         received+=( "${dest_base}/${ds}" )
         sess_recvd[$ds]=1
         if [[ "$est" == "-" ]]; then
@@ -450,22 +442,14 @@ do_resume() {
     errf=$(mktemp)
     vf=$(mktemp)
     set +e
-    if (( proto_minor >= 1 )); then
-        # see do_send: -v writes to stdout = the socket; redirect away
-        zfs recv -s -v "${dest_base}/${ds}" >"$vf" 2>"$errf"
-    else
-        zfs recv -s "${dest_base}/${ds}" 2>"$errf"
-    fi
+    # see do_send: -v writes to stdout = the socket; redirect away
+    zfs recv -s -v "${dest_base}/${ds}" >"$vf" 2>"$errf"
     rc=$?
     set -e
     if (( rc == 0 )); then
         bytes=$(recv_bytes "$vf")
         rm -f -- "$errf" "$vf"
-        if (( proto_minor >= 1 )); then
-            out "OK $ds ${bytes:--}"
-        else
-            out "OK $ds"
-        fi
+        out "OK $ds ${bytes:--}"
         received+=( "${dest_base}/${ds}" )
         sess_recvd[$ds]=1
         log "resumed $ds${bytes:+ ($bytes bytes on wire)}"
@@ -611,6 +595,10 @@ stamp_unknown() {
     done < <(zfs get -H -r -s local -t snapshot -o name,value zfsrecvd:unknown-since "${dest_base}/${tree_root}" 2>/dev/null || true)
     for d in "${man_ds[@]}"; do
         [[ -n "${rhave[$d]:-}" ]] || continue
+        # same evidence rule as the collision pass: a bare manifest
+        # entry says nothing about the client's snapshots, and absence
+        # of evidence never starts a reclaim clock
+        [[ -n "${man_gset[$d]:-}" ]] || continue
         under_renamed "$d" && continue
         IFS=, read -r -a rsl <<<"${rhave[$d]}"
         for sn in "${rsl[@]}"; do
@@ -653,9 +641,7 @@ stamp_unknown() {
 
 do_endtree() {
     prune_tree
-    if (( proto_minor >= 1 )); then
-        stamp_unknown
-    fi
+    stamp_unknown
     if [[ ${#received[@]} -gt 0 ]]; then
         local stamp
         stamp="zfsrecvd:last-recv=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -688,39 +674,32 @@ handle_tree() {   # $1 = tree root, $2 = target snapname
             ended=1
             break
         fi
-        if (( proto_minor >= 1 )); then
-            # 2.1 manifest: DS <ds> [entry,entry,...] where an entry is
-            # <snap>:<guid> or #<bookmark>:<guid> ('#' is outside the
-            # snapname charset, so the two are unambiguous). Bookmark
-            # entries are the client's replication cursors -- lineage
-            # evidence for the collision pass, nothing else.
-            if [[ "$line" =~ ^DS\ ([A-Za-z0-9._/-]+)(\ ([A-Za-z0-9._#:,-]+))?$ ]]; then
-                d="${BASH_REMATCH[1]}"
-                ents="${BASH_REMATCH[3]:-}"
-                in_tree "$d" || proto_err "manifest dataset outside tree: $d"
-                man_ds+=( "$d" )
-                if [[ -n "$ents" ]]; then
-                    IFS=, read -r -a el <<<"$ents"
-                    for e in "${el[@]}"; do
-                        nm="${e%:*}"
-                        gd="${e##*:}"
-                        if [[ "$e" != *:* || -z "$nm" ]] || ! [[ "$gd" =~ ^[0-9]+$ ]]; then
-                            proto_err "bad manifest entry for $d"
-                        fi
-                        man_gset[$d]="${man_gset[$d]:-}${man_gset[$d]:+ }$gd"
-                        if [[ "$nm" != "#"* ]]; then
-                            man_ng["$d@$nm"]="$gd"
-                            man_order[$d]="${man_order[$d]:-}${man_order[$d]:+ }$nm"
-                        fi
-                    done
-                fi
-                manifest_count=$(( manifest_count + 1 ))
-            else
-                proto_err "bad manifest line"
-            fi
-        elif [[ "$line" =~ ^DS\ ([A-Za-z0-9._/-]+)$ ]]; then
+        # Manifest: DS <ds> [entry,entry,...] where an entry is
+        # <snap>:<guid> or #<bookmark>:<guid> ('#' is outside the
+        # snapname charset, so the two are unambiguous). Bookmark
+        # entries are the client's replication cursors -- lineage
+        # evidence for the collision pass, nothing else. A bare DS line
+        # (no snapshots, no cursors) is legal and carries no evidence.
+        if [[ "$line" =~ ^DS\ ([A-Za-z0-9._/-]+)(\ ([A-Za-z0-9._#:,-]+))?$ ]]; then
             d="${BASH_REMATCH[1]}"
+            ents="${BASH_REMATCH[3]:-}"
             in_tree "$d" || proto_err "manifest dataset outside tree: $d"
+            man_ds+=( "$d" )
+            if [[ -n "$ents" ]]; then
+                IFS=, read -r -a el <<<"$ents"
+                for e in "${el[@]}"; do
+                    nm="${e%:*}"
+                    gd="${e##*:}"
+                    if [[ "$e" != *:* || -z "$nm" ]] || ! [[ "$gd" =~ ^[0-9]+$ ]]; then
+                        proto_err "bad manifest entry for $d"
+                    fi
+                    man_gset[$d]="${man_gset[$d]:-}${man_gset[$d]:+ }$gd"
+                    if [[ "$nm" != "#"* ]]; then
+                        man_ng["$d@$nm"]="$gd"
+                        man_order[$d]="${man_order[$d]:-}${man_order[$d]:+ }$nm"
+                    fi
+                done
+            fi
             manifest_count=$(( manifest_count + 1 ))
         else
             proto_err "bad manifest line"
@@ -729,9 +708,7 @@ handle_tree() {   # $1 = tree root, $2 = target snapname
     [[ -n "$ended" ]] || proto_err "eof/timeout in manifest"
     log "TREE $tree_root@$snap ($manifest_count datasets in manifest)"
     gather_state
-    if (( proto_minor >= 1 )); then
-        resolve_collisions
-    fi
+    resolve_collisions
     out "OK TREE"
     emit_state
 

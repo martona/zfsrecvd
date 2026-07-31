@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# zfsrecvd protocol 2.0/2.1 end-to-end test suite. Runs ON the test VM.
-# T1-T10 exercise the full transfer machinery (now over a 2.1 session);
-# T8 hand-drives a 2.0 session, proving the compat path. T11+ are the
-# 2.1 GUID features: unknown-since stamps, the base guid veto,
+# zfsrecvd protocol 2.1 end-to-end test suite. Runs ON the test VM.
+# T1-T10 exercise the full transfer machinery; T8 hand-drives a raw
+# session; T9 proves non-2.x versions are rejected. T11+ are the 2.1
+# GUID features: unknown-since stamps, the base guid veto,
 # rename-aside, cursor catch-up survival, received-bytes.
 # Assumes: repo scripts in ~/zfsrecvd-src, passwordless sudo, zfs, socat, pv.
 # Everything happens in a file-backed pool "ztest"; rpool/bpool untouched.
@@ -177,10 +177,12 @@ check "T7 dest pruned to 6 (got $dst_n)" test "$dst_n" -eq 6
 check "T7 non-prefixed s1 survived on dest" sudo zfs list -H "$DEST@s1"
 
 echo "=== T8: multi-TREE control session + refusal, hand-driven ==="
-{ printf 'zfsrecvd2.0\nTREE ztest/src zfsrecvd-2026-07-27-1080Z\nDS ztest/src\n\nSEND ztest/other - nope -\nENDTREE\nTREE ztest/src zfsrecvd-2026-07-27-1080Z\nDS ztest/src\n\nENDTREE\nBYE\n'; sleep 3; } \
+# bare DS lines (no guid entries) are legal 2.1: absence of evidence,
+# so the collision pass must leave everything alone
+{ printf 'zfsrecvd2.1\nTREE ztest/src zfsrecvd-2026-07-27-1080Z\nDS ztest/src\n\nSEND ztest/other - nope -\nENDTREE\nTREE ztest/src zfsrecvd-2026-07-27-1080Z\nDS ztest/src\n\nENDTREE\nBYE\n'; sleep 3; } \
     | sudo openssl s_client -connect localhost:5299 -CAfile /etc/zfsrecvd/ca.pem \
         -cert /etc/zfsrecvd/client.pem -key /etc/zfsrecvd/client.key -quiet 2>/dev/null >/tmp/t8.log
-check "T8 greeting"        grep -q "OK zfsrecvd2.0" /tmp/t8.log
+check "T8 greeting"        grep -q "OK zfsrecvd2.1" /tmp/t8.log
 check "T8 out-of-tree refused" grep -q "ERR refused ztest/other" /tmp/t8.log
 n_oktree=$(grep -c "OK TREE" /tmp/t8.log)
 n_okend=$(grep -c "OK ENDTREE" /tmp/t8.log)
