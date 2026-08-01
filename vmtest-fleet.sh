@@ -325,6 +325,22 @@ grep -q "0 failed" /tmp/fleet11.log && ok "T17 surviving jobs clean" || { bad "T
 grep -qF '"dst":"vmrecv2","state":"cadence"' "$RJ" && ok "T17 cadence state in jsonl" || { bad "T17 jsonl"; tail -n 3 "$RJ"; }
 /usr/local/lib/stevedore/stevedore-report.sh 2>/dev/null | grep -q "1 within cadence" && ok "T17 report shows the skip" || { bad "T17 report"; /usr/local/lib/stevedore/stevedore-report.sh 2>&1 | head -n 8; }
 
+# PARTIAL skip: a cadence destination with one fresh and one stale
+# tuple stays in the run, and the console NAMES the stale survivors --
+# "N within window; skipping" followed by provisioning reads as a
+# cadence bug otherwise (bit the owner on the real fleet: a fresh
+# steve-jobs row kept waking EC2 with no explanation on screen)
+sudo zfs create -p ztest/src2/x 2>/dev/null
+cp ~/fleet-cad.conf ~/fleet-cadp.conf
+echo "$CN   ztest/src2   vmrecv2" >> ~/fleet-cadp.conf
+/usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-cadp.conf >/tmp/fleet20.log 2>&1
+rc=$?
+check "T17 partial-skip rc=0" test "$rc" -eq 0
+grep -q "cadence: \[vmrecv2\] 1 job(s) within 24h" /tmp/fleet20.log && ok "T17 partial: fresh tuple skipped" || { bad "T17 partial skip"; grep -a "cadence" /tmp/fleet20.log; }
+grep -q "cadence: \[vmrecv2\] still runs -- no recent success for: $CN ztest/src2" /tmp/fleet20.log && ok "T17 partial: stale survivor named" || { bad "T17 survivor"; grep -a "cadence" /tmp/fleet20.log; }
+grep -q "starting run listener on \[vmrecv2\]" /tmp/fleet20.log && ok "T17 partial: destination participates" || { bad "T17 partial participate"; tail -n 20 /tmp/fleet20.log; }
+grep -q "0 failed" /tmp/fleet20.log && ok "T17 partial run clean" || { bad "T17 partial failures"; tail -n 20 /tmp/fleet20.log; }
+
 # --force-ec2 overrides the window
 /usr/local/lib/stevedore/stevedore-fleetrun.sh --force-ec2 -c ~/fleet-cad.conf >/tmp/fleet12.log 2>&1
 rc=$?

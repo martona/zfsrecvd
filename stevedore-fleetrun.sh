@@ -286,6 +286,20 @@ if [[ -n "$has_cadence" && -z "$force_ec2" ]]; then
             if [[ -n "${cad_n[$h]:-}" && -z "${_post_recv[$h]:-}" && -n "${fleet_host_ec2[$h]:-}" ]]; then
                 echo "cadence: [$h] EC2 wake skipped" >&2
             fi
+            if [[ -n "${cad_n[$h]:-}" && -n "${_post_recv[$h]:-}" ]]; then
+                # PARTIAL skip: name what kept the destination in the run
+                # -- "N within window; skipping" followed by a wake reads
+                # as a cadence bug otherwise (owner hit exactly that
+                # reading; the survivors were a fresh steve-jobs row and
+                # an offline-during-last-window source catching up)
+                _stale=""
+                for (( _ci = 0; _ci < ${#fleet_job_src[@]}; _ci++ )); do
+                    if [[ "${fleet_job_dest[_ci]}" == "$h" ]]; then
+                        _stale+="${_stale:+, }${fleet_job_src[_ci]} ${fleet_job_tree[_ci]}"
+                    fi
+                done
+                echo "cadence: [$h] still runs -- no recent success for: $_stale" >&2
+            fi
         done
     fi
 fi
