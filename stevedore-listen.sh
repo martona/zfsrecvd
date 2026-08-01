@@ -2,19 +2,20 @@
 # Launch a forking socat listener for ZFS replication.
 # All stderr (socat and its children) is consumed by systemd and ends in the journal.
 
-source /etc/zfsrecvd/cfgparser.sh
+here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+source "$here/stevedore-cfgparser.sh"
 
 echo "Starting ZFS receive listener on $tcp_addr:$tcp_port (transport: $transport)" >&2
 
 # H transport (PROTOCOL.md §20): haproxy owns TLS on the public port and
 # forwards plaintext to us on loopback, prepending a PROXY protocol v2
-# header with the verified client CN -- zfsrecvd.sh parses it fail-closed
-# via pp2.sh. This listener must never be reachable beyond loopback; the
-# generated run config pins tcp-addr to 127.0.0.1.
+# header with the verified client CN -- stevedore-recv.sh parses it
+# fail-closed via stevedore-pp2.sh. This listener must never be reachable
+# beyond loopback; the generated run config pins tcp-addr to 127.0.0.1.
 if [[ "$transport" == "haproxy" ]]; then
     exec /usr/bin/socat -b 262144 \
         "TCP-LISTEN:${tcp_port},bind=${tcp_addr},reuseaddr,fork,max-children=16,nodelay" \
-        EXEC:'/etc/zfsrecvd/zfsrecvd.sh'
+        EXEC:"$here/stevedore-recv.sh"
 fi
 
 # Options assembled in a variable on purpose: a missing "\" in the old
@@ -30,5 +31,5 @@ ssl_opts+=",verify=1"
 
 exec /usr/bin/socat -b 262144 \
     "OPENSSL-LISTEN:${tcp_port},bind=${tcp_addr},${ssl_opts}" \
-    EXEC:'/etc/zfsrecvd/zfsrecvd.sh' \
+    EXEC:"$here/stevedore-recv.sh" \
     2> >(grep --line-buffered -v "OpenSSL: Warning: this implementation does not check CRLs" >&2)

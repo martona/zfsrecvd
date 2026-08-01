@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Shared helpers for orchestrate.sh, deploy.sh, and fleetrun.sh: the ssh
-# option set, the estate lock, and the EC2 wake/stop logic.
-# Source this after cfgparser.sh. Call orch_lock to take the shared lock,
+# Shared helpers for stevedore-orchestrate.sh and stevedore-fleetrun.sh:
+# the ssh option set, the estate lock, and the EC2 wake/stop logic.
+# Source this after the cfgparser. Call orch_lock to take the shared lock,
 # and ec2_maybe_start once to wake the fleet; instances it starts -- plus
 # any debt a crashed earlier run left behind -- are stopped by an EXIT trap
 # it installs.
@@ -17,6 +17,7 @@
 # would otherwise print on every single connection; real errors still
 # come through. Host authenticity is treated as a property of the
 # LAN/tailnet; the data path authenticates itself with mTLS either way.
+source "$(dirname "${BASH_SOURCE[0]}")/stevedore-paths.sh"
 ssh_opts=( -o ConnectTimeout=10 -o BatchMode=yes
            -o StrictHostKeyChecking=no
            -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null
@@ -32,7 +33,7 @@ orch_lock() {
     if [[ -n "${ZFSRECVD_SKIP_LOCK:-}" ]]; then
         return 0
     fi
-    local lock_file="${ZFSRECVD_LOCK_FILE:-/run/lock/zfsrecvd-orchestrate.lock}"
+    local lock_file="${ZFSRECVD_LOCK_FILE:-/run/lock/stevedore-orchestrate.lock}"
     # Probe with a normal redirection first: a failed exec redirection would
     # abort the script with a bare "Permission denied" instead of this hint.
     if ! : 2>/dev/null >> "$lock_file"; then
@@ -55,9 +56,9 @@ ec2_instances_to_stop=()
 # otherwise consider them "already running" forever and never stop them.)
 # The -w check matters: mkdir -p succeeds on an existing root-owned dir even
 # when we can't write into it.
-ec2_state_dir="/var/lib/zfsrecvd"
+ec2_state_dir="$STEVE_VAR"
 if ! mkdir -p "$ec2_state_dir" 2>/dev/null || [[ ! -w "$ec2_state_dir" ]]; then
-    ec2_state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/zfsrecvd"
+    ec2_state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/stevedore"
     mkdir -p "$ec2_state_dir"
 fi
 ec2_pending_file="$ec2_state_dir/ec2-pending-stop"

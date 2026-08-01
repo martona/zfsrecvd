@@ -19,12 +19,13 @@
 # stops at the stream's END record without needing EOF, and the client is
 # forbidden from writing anything after a stream until it sees our result
 # line. See PROTOCOL.md for the full contract; v1.1 is not supported (the
-# fleet upgrades atomically via deploy.sh).
+# fleet upgrades atomically -- every run ships current scripts).
 
 set -euo pipefail
 set -f                       # never glob; we word-split protocol input
-source /etc/zfsrecvd/cfgparser.sh
-source /etc/zfsrecvd/retain.sh
+here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+source "$here/stevedore-cfgparser.sh"
+source "$here/stevedore-retain.sh"
 
 # Field grammars from PROTOCOL.md §3. Anything outside these charsets is
 # rejected before it reaches a zfs command line.
@@ -56,7 +57,7 @@ proto_err() {
 #     pp2_read_cn consumes exactly that header (fail-closed ladder, see
 #     pp2.sh) and leaves the session bytes untouched on stdin.
 if [[ "$transport" == "haproxy" ]]; then
-    source /etc/zfsrecvd/pp2.sh
+    source "$here/stevedore-pp2.sh"
     if ! pp2_read_cn; then
         log "ERROR: bad/missing PROXY protocol header on the plaintext port (direct dial? haproxy misconfig?); dropping"
         exit 1
@@ -533,7 +534,7 @@ prune_tree() {
                 if zfs destroy "${ds}@${name}" 2>/dev/null; then
                     pruned=$(( pruned + 1 ))
                     freed=$(( freed + b ))
-                    if [[ "$cert_dir" != "/etc/zfsrecvd" ]]; then
+                    if [[ "$cert_dir" != "$STEVE_ETC" ]]; then
                         echo "${ds}@${name}" >> "${cert_dir}/pruned.list" 2>/dev/null || true
                     fi
                 else
@@ -549,7 +550,7 @@ prune_tree() {
                 if zfs destroy "${list[i]}" 2>/dev/null; then
                     pruned=$(( pruned + 1 ))
                     freed=$(( freed + b ))
-                    if [[ "$cert_dir" != "/etc/zfsrecvd" ]]; then
+                    if [[ "$cert_dir" != "$STEVE_ETC" ]]; then
                         echo "${list[i]}" >> "${cert_dir}/pruned.list" 2>/dev/null || true
                     fi
                 else
@@ -564,8 +565,8 @@ prune_tree() {
         # so this UNDERestimates. Honest enough for the run report.
         log "pruned $pruned snapshots under $dest_tree (~$freed bytes reclaimed)"
         # per-run reclaim ledger for fleetrun's report -- run dirs only,
-        # never the static /etc/zfsrecvd
-        if [[ "$cert_dir" != "/etc/zfsrecvd" ]]; then
+        # never the static config dir
+        if [[ "$cert_dir" != "$STEVE_ETC" ]]; then
             echo "$freed" >> "${cert_dir}/pruned.bytes" 2>/dev/null || true
         fi
     fi

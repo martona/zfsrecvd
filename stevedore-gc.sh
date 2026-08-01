@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Orphan GC, WARN-ONLY build (PROTOCOL.md §22), manifest era: since 2.1
-# the SERVER owns every clock (zfsrecvd.sh stamps orphan-since on
+# the SERVER owns every clock (stevedore-recv.sh stamps orphan-since on
 # manifest-absent datasets and unknown-since on receiver-only snapshots
 # at ENDTREE, and clears both on reappearance). This script is READ-ONLY
 # -- it renders the clocks. Runs ON a receiver against its recv_root;
@@ -21,13 +21,14 @@
 # Exit 0 always.
 
 set -euo pipefail
-source /etc/zfsrecvd/cfgparser.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/stevedore-cfgparser.sh"
 
 # Env-overridable so the machinery can be WATCHED without waiting months
 # -- safe to turn all the way down precisely because this build cannot
 # destroy anything:
 #   sudo env ZFSRECVD_GC_WARN_DAYS=0 ZFSRECVD_GC_GRACE_DAYS=0 \
-#       ZFSRECVD_CONF=/etc/zfsrecvd/run/<id>/run.conf /etc/zfsrecvd/gc.sh
+#       ZFSRECVD_CONF=/run/stevedore/<id>/run.conf \
+#       /usr/local/lib/stevedore/stevedore-gc.sh
 WARN_DAYS="${ZFSRECVD_GC_WARN_DAYS:-60}"    # stamp -> console warnings
 GRACE_DAYS="${ZFSRECVD_GC_GRACE_DAYS:-90}"  # stamp -> reclaim-eligible
 

@@ -2,7 +2,7 @@
 # Parser for fleet.conf -- the Final Shape's single source of truth, read
 # ONLY by the orchestrator (fleetrun.sh). Schema: PROTOCOL.md Part II §18.
 #
-# Source this, then call:  fleet_parse /etc/zfsrecvd/fleet.conf
+# Source this, then call:  fleet_parse /etc/stevedore/fleet.conf
 # On success the fleet_* globals below are populated; on ANY problem it
 # exits 78 (EX_CONFIG) with "file:line: message". Validation is loud and
 # fatal on purpose: this file is hand-edited and spreadsheet-pasted, and a

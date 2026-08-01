@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Parse /etc/zfsrecvd/zfsrecvd.conf and leave:
+# Parse /etc/stevedore/stevedore.conf and leave:
 #   * recv_root      (string)
 #   * tcp_port       (string)
 #   * tcp_addr       (string)
@@ -15,7 +15,9 @@
 #   * tunnels        (bash array: "dial localport" rows, haproxy senders)
 #   * retain_spec    (string: retention grid, e.g. "hourly=48 daily=30")
 
-CFG="${ZFSRECVD_CONF:-/etc/zfsrecvd/zfsrecvd.conf}"
+source "$(dirname "${BASH_SOURCE[0]}")/stevedore-paths.sh"
+
+CFG="${ZFSRECVD_CONF:-$STEVE_ETC/stevedore.conf}"
 
 recv_root="" tcp_port="" tcp_addr="" keep_count="" cert_dir="" allowed_hosts=()
 sends=() prune_prefixes=() orchtargets=() orchjobs=() orchec2up=() orchworkers=""
@@ -70,9 +72,9 @@ done
 if [[ -z "$recv_root" ]]; then recv_root="ebs/recv"; fi
 if [[ -z "$tcp_port"  ]]; then tcp_port=5299;        fi
 if ! [[ "$keep_count" =~ ^[0-9]+$ ]]; then keep_count=6; fi
-# cert-dir lets a generated run config point at per-run certs (fleetrun.sh)
-# without touching the static /etc/zfsrecvd ones.
-if [[ -z "$cert_dir" ]]; then cert_dir="/etc/zfsrecvd"; fi
+# cert-dir lets a generated run config point at per-run certs (fleetrun)
+# without touching any statically-placed ones.
+if [[ -z "$cert_dir" ]]; then cert_dir="$STEVE_ETC"; fi
 if [[ -z "$transport" ]]; then transport="socat"; fi
 if [[ ${#prune_prefixes[@]} -eq 0 ]]; then prune_prefixes=( "zfsrecvd-" ); fi
 

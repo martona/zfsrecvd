@@ -5,6 +5,7 @@
 # positional on that ordering). Parses only our own stable output --
 # plain awk (mawk-safe), no jq dependency.
 set -euo pipefail
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/stevedore-paths.sh"
 
 n=10
 f=""
@@ -14,16 +15,16 @@ while (( $# > 0 )); do
         -n) n="${2:?}"; shift 2 ;;
         -f) f="${2:?}"; shift 2 ;;
         --gc-debug) gcdbg=1; shift ;;   # also render gc "track" inventory
-        *)  echo "usage: report.sh [-n runs] [-f runs.jsonl] [--gc-debug]" >&2; exit 64 ;;
+        *)  echo "usage: steve report [-n runs] [-f runs.jsonl] [--gc-debug]" >&2; exit 64 ;;
     esac
 done
 if [[ -z "$f" ]]; then
-    for c in /var/log/zfsrecvd/runs.jsonl "${XDG_STATE_HOME:-$HOME/.local/state}/zfsrecvd/runs.jsonl"; do
+    for c in "$STEVE_VAR/runs.jsonl" "${XDG_STATE_HOME:-$HOME/.local/state}/stevedore/runs.jsonl"; do
         if [[ -s "$c" ]]; then f="$c"; break; fi
     done
 fi
 if [[ -z "$f" || ! -s "$f" ]]; then
-    echo "no runs.jsonl found (looked in /var/log/zfsrecvd and the state dir)" >&2
+    echo "no runs.jsonl found (looked in $STEVE_VAR and the state dir)" >&2
     exit 1
 fi
 

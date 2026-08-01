@@ -39,9 +39,9 @@ sudo truncate -s 12G /var/tmp/ztest.img
 sudo zpool create -f -O mountpoint=none ztest /var/tmp/ztest.img || { echo "pool create failed"; exit 1; }
 sudo zfs create ztest/recv
 
-sudo bash ~/zfsrecvd-src/install.sh >/dev/null
+sudo bash ~/zfsrecvd-src/stevedore.sh install >/dev/null
 
-sudo tee /etc/zfsrecvd/zfsrecvd.conf >/dev/null <<EOF
+sudo tee /etc/stevedore/stevedore.conf >/dev/null <<EOF
 [recv-root]
 ztest/recv
 [tcp-port]
@@ -57,7 +57,7 @@ zfsrecvd-
 EOF
 
 sudo bash -c '
-cd /etc/zfsrecvd
+cd /etc/stevedore
 openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.pem -days 2 -subj "/CN=zfsrecvd-test-ca" 2>/dev/null
 openssl req -newkey rsa:2048 -nodes -keyout server.key -out server.csr -subj "/CN=localhost" 2>/dev/null
 openssl x509 -req -in server.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 2 -out server.pem 2>/dev/null
@@ -66,7 +66,7 @@ openssl x509 -req -in client.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 
 chmod 600 *.key
 '
 
-sudo systemd-run --unit=zfsrecvd-test /etc/zfsrecvd/listen.sh >/dev/null 2>&1
+sudo systemd-run --unit=zfsrecvd-test /usr/local/lib/stevedore/stevedore-listen.sh >/dev/null 2>&1
 sleep 1
 check "listener is up on 5299" bash -c 'ss -tln | grep -q :5299'
 
@@ -80,7 +80,7 @@ sudo zfs create -o encryption=on -o keyformat=passphrase -o keylocation=file:///
 sudo zfs snapshot -r ztest/src@s1
 
 echo "=== T1: initial full replication of the tree ==="
-sudo /etc/zfsrecvd/sendtree.sh ztest/src localhost >/tmp/t1.log 2>&1
+sudo /usr/local/lib/stevedore/stevedore-sendtree.sh ztest/src localhost >/tmp/t1.log 2>&1
 rc=$?
 check "T1 exit 0" test "$rc" -eq 0
 check "T1 nested dataset arrived"  sudo zfs list -H "$DEST/a/deep@s1"
@@ -91,7 +91,7 @@ grep -q "14 sent" /tmp/t1.log && ok "T1 counted 14 sent" || { bad "T1 sent count
 
 echo "=== T2: idempotent re-run, all up to date ==="
 start=$SECONDS
-sudo /etc/zfsrecvd/sendtree.sh ztest/src localhost >/tmp/t2.log 2>&1
+sudo /usr/local/lib/stevedore/stevedore-sendtree.sh ztest/src localhost >/tmp/t2.log 2>&1
 rc=$?
 t2_dur=$((SECONDS-start))
 check "T2 exit 0" test "$rc" -eq 0
@@ -101,7 +101,7 @@ check "T2 fast (<10s, was $t2_dur)" test "$t2_dur" -lt 10
 echo "=== T3: incremental ==="
 sudo dd if=/dev/zero of=/dev/zvol/ztest/src/vol bs=1M count=8 oflag=direct 2>/dev/null
 sudo zfs snapshot -r ztest/src@s2
-sudo /etc/zfsrecvd/sendtree.sh ztest/src localhost >/tmp/t3.log 2>&1
+sudo /usr/local/lib/stevedore/stevedore-sendtree.sh ztest/src localhost >/tmp/t3.log 2>&1
 rc=$?
 check "T3 exit 0" test "$rc" -eq 0
 check "T3 vol@s2 arrived"  sudo zfs list -H "$DEST/vol@s2"
@@ -112,7 +112,7 @@ sudo zfs create ztest/src/late
 sudo zfs snapshot ztest/src/late@old1
 sleep 1
 sudo zfs snapshot -r ztest/src@s3
-sudo /etc/zfsrecvd/sendtree.sh ztest/src localhost >/tmp/t4.log 2>&1
+sudo /usr/local/lib/stevedore/stevedore-sendtree.sh ztest/src localhost >/tmp/t4.log 2>&1
 rc=$?
 check "T4 exit 0" test "$rc" -eq 0
 check "T4 late@old1 (bootstrap leg)" sudo zfs list -H "$DEST/late@old1"
@@ -124,19 +124,19 @@ sudo zfs create -V 3G ztest/src/big
 wait_zvol /dev/zvol/ztest/src/big
 sudo dd if=/dev/urandom of=/dev/zvol/ztest/src/big bs=1M count=600 oflag=direct 2>/dev/null
 sudo zfs snapshot ztest/src/big@s4big
-sudo env ZFSRECVD_PV_EXTRA="-L 60M" /etc/zfsrecvd/send.sh ztest/src/big@s4big localhost >/tmp/t5a.log 2>&1 &
+sudo env ZFSRECVD_PV_EXTRA="-L 60M" /usr/local/lib/stevedore/stevedore-send.sh ztest/src/big@s4big localhost >/tmp/t5a.log 2>&1 &
 bg=$!
 for _ in $(seq 1 50); do pgrep -f 'zfs send -R ztest/src/big@s4big' >/dev/null && break; sleep 0.2; done
 sleep 1.5
 # kill the whole client so its reconnect-and-resume logic cannot self-heal
 # before we get to inspect the token
-sudo pkill -f 'sendtree.sh --single ztest/src/big@s4big'
+sudo pkill -f 'stevedore-sendtree.sh --single ztest/src/big@s4big'
 sudo pkill -f 'zfs send -R ztest/src/big@s4big'
 wait "$bg" 2>/dev/null
 sleep 1
 tok=$(sudo zfs get -H -o value receive_resume_token "$DEST/big" 2>/dev/null)
 if [ -n "$tok" ] && [ "$tok" != "-" ]; then ok "T5 token exists after interrupt"; else bad "T5 token exists after interrupt (tok=$tok)"; cat /tmp/t5a.log; fi
-sudo /etc/zfsrecvd/send.sh ztest/src/big@s4big localhost >/tmp/t5b.log 2>&1
+sudo /usr/local/lib/stevedore/stevedore-send.sh ztest/src/big@s4big localhost >/tmp/t5b.log 2>&1
 rc=$?
 check "T5 resume run exit 0" test "$rc" -eq 0
 grep -q "(resume)" /tmp/t5b.log && ok "T5 resume path taken" || { bad "T5 resume path taken"; cat /tmp/t5b.log; }
@@ -147,18 +147,18 @@ check "T5 token cleared" test "$tok" = "-"
 echo "=== T6: unsatisfiable token gets ABORTed ==="
 sudo dd if=/dev/urandom of=/dev/zvol/ztest/src/big bs=1M count=400 seek=700 oflag=direct 2>/dev/null
 sudo zfs snapshot ztest/src/big@s5big
-sudo env ZFSRECVD_PV_EXTRA="-L 60M" /etc/zfsrecvd/send.sh ztest/src/big@s5big localhost >/tmp/t6a.log 2>&1 &
+sudo env ZFSRECVD_PV_EXTRA="-L 60M" /usr/local/lib/stevedore/stevedore-send.sh ztest/src/big@s5big localhost >/tmp/t6a.log 2>&1 &
 bg=$!
 for _ in $(seq 1 50); do pgrep -f 'zfs send.*ztest/src/big@s5big' >/dev/null && break; sleep 0.2; done
 sleep 1.5
-sudo pkill -f 'sendtree.sh --single ztest/src/big@s5big'
+sudo pkill -f 'stevedore-sendtree.sh --single ztest/src/big@s5big'
 sudo pkill -f 'zfs send.*ztest/src/big@s5big'
 wait "$bg" 2>/dev/null
 sleep 1
 tok=$(sudo zfs get -H -o value receive_resume_token "$DEST/big" 2>/dev/null)
 if [ -n "$tok" ] && [ "$tok" != "-" ]; then ok "T6 token exists"; else bad "T6 token exists (tok=$tok)"; cat /tmp/t6a.log; fi
 sudo zfs destroy ztest/src/big@s5big
-sudo /etc/zfsrecvd/send.sh ztest/src/big localhost >/tmp/t6b.log 2>&1
+sudo /usr/local/lib/stevedore/stevedore-send.sh ztest/src/big localhost >/tmp/t6b.log 2>&1
 rc=$?
 check "T6 exit 0 after abort" test "$rc" -eq 0
 grep -q "not satisfiable" /tmp/t6b.log && ok "T6 abort path taken" || { bad "T6 abort path taken"; cat /tmp/t6b.log; }
@@ -168,7 +168,7 @@ check "T6 token cleared" test "$tok" = "-"
 echo "=== T7: pruning keeps 6 zfsrecvd-* snapshots each side ==="
 for i in 1 2 3 4 5 6 7 8; do
     sudo zfs snapshot -r "ztest/src@zfsrecvd-2026-07-27-10${i}0Z"
-    sudo /etc/zfsrecvd/sendtree.sh ztest/src localhost >"/tmp/t7-$i.log" 2>&1 || bad "T7 run $i failed"
+    sudo /usr/local/lib/stevedore/stevedore-sendtree.sh ztest/src localhost >"/tmp/t7-$i.log" 2>&1 || bad "T7 run $i failed"
 done
 src_n=$(sudo zfs list -H -t snapshot -d 1 -o name ztest/src | grep -c '@zfsrecvd-')
 dst_n=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST" | grep -c '@zfsrecvd-')
@@ -187,8 +187,8 @@ echo "=== T8: multi-TREE control session + refusal, hand-driven ==="
   sudo zfs list -H -r -t filesystem,volume -o name ztest/src | sed 's/^/DS /'
   printf '\nENDTREE\nBYE\n'
   sleep 3; } \
-    | sudo openssl s_client -connect localhost:5299 -CAfile /etc/zfsrecvd/ca.pem \
-        -cert /etc/zfsrecvd/client.pem -key /etc/zfsrecvd/client.key -quiet 2>/dev/null >/tmp/t8.log
+    | sudo openssl s_client -connect localhost:5299 -CAfile /etc/stevedore/ca.pem \
+        -cert /etc/stevedore/client.pem -key /etc/stevedore/client.key -quiet 2>/dev/null >/tmp/t8.log
 check "T8 greeting"        grep -q "OK zfsrecvd2.1" /tmp/t8.log
 check "T8 out-of-tree refused" grep -q "ERR refused ztest/other" /tmp/t8.log
 n_oktree=$(grep -c "OK TREE" /tmp/t8.log)
@@ -198,13 +198,13 @@ check "T8 two ENDTREEs (got $n_okend)" test "$n_okend" -eq 2
 
 echo "=== T9: bad version is rejected ==="
 { printf 'zfsrecvd1.1\nztest/src@s1\n\n'; sleep 1; } \
-    | sudo openssl s_client -connect localhost:5299 -CAfile /etc/zfsrecvd/ca.pem \
-        -cert /etc/zfsrecvd/client.pem -key /etc/zfsrecvd/client.key -quiet 2>/dev/null >/tmp/t9.log
+    | sudo openssl s_client -connect localhost:5299 -CAfile /etc/stevedore/ca.pem \
+        -cert /etc/stevedore/client.pem -key /etc/stevedore/client.key -quiet 2>/dev/null >/tmp/t9.log
 if grep -q "OK" /tmp/t9.log; then bad "T9 v1.1 wrongly accepted"; else ok "T9 v1.1 rejected"; fi
 
 echo "=== T10: timing snapshot ==="
 start=$SECONDS
-sudo /etc/zfsrecvd/sendtree.sh ztest/src localhost >/tmp/t10.log 2>&1
+sudo /usr/local/lib/stevedore/stevedore-sendtree.sh ztest/src localhost >/tmp/t10.log 2>&1
 t10=$((SECONDS-start))
 n_ds=$(sudo zfs list -H -r -t filesystem,volume ztest/src | wc -l)
 echo "INFO: up-to-date run over $n_ds datasets took ${t10}s"
@@ -215,7 +215,7 @@ echo "=== T11: receiver-only snapshots get unknown-since; reappearance clears ==
 sudo zfs snapshot "$DEST/b@recvonly"
 # (b) a synced snapshot carrying a stale stamp is cleared (guid reappears)
 sudo zfs set zfsrecvd:unknown-since=2026-01-01T00:00:00Z "$DEST/b@s2"
-sudo /etc/zfsrecvd/sendtree.sh ztest/src localhost >/tmp/t11.log 2>&1
+sudo /usr/local/lib/stevedore/stevedore-sendtree.sh ztest/src localhost >/tmp/t11.log 2>&1
 rc=$?
 check "T11 exit 0" test "$rc" -eq 0
 us=$(sudo zfs get -H -s local -o value zfsrecvd:unknown-since "$DEST/b@recvonly" 2>/dev/null)
@@ -229,11 +229,11 @@ check "T11 no prefix snap stamped (got $pn)" test "$pn" -eq 0
 
 echo "=== T12: snapshot name reuse -> guid veto -> replanned base ==="
 sudo zfs snapshot ztest/src/c@dup
-sudo /etc/zfsrecvd/send.sh ztest/src/c@dup localhost >/tmp/t12a.log 2>&1 || bad "T12 seed sync failed"
+sudo /usr/local/lib/stevedore/stevedore-send.sh ztest/src/c@dup localhost >/tmp/t12a.log 2>&1 || bad "T12 seed sync failed"
 sudo zfs destroy ztest/src/c@dup
 sudo zfs snapshot ztest/src/c@dup          # same name, new guid
 sudo zfs snapshot ztest/src/c@dup2
-sudo /etc/zfsrecvd/send.sh ztest/src/c@dup2 localhost >/tmp/t12b.log 2>&1
+sudo /usr/local/lib/stevedore/stevedore-send.sh ztest/src/c@dup2 localhost >/tmp/t12b.log 2>&1
 rc=$?
 check "T12 exit 0" test "$rc" -eq 0
 grep -q "guid mismatch" /tmp/t12b.log && ok "T12 veto refusal observed" || { bad "T12 veto"; cat /tmp/t12b.log; }
@@ -249,7 +249,7 @@ echo "=== T13: recreated dataset and zvol get renamed aside, not clobbered ==="
 sudo zfs destroy -r ztest/src/d
 sudo zfs create ztest/src/d
 sudo zfs snapshot ztest/src/d@n1
-sudo /etc/zfsrecvd/send.sh ztest/src/d@n1 localhost >/tmp/t13a.log 2>&1
+sudo /usr/local/lib/stevedore/stevedore-send.sh ztest/src/d@n1 localhost >/tmp/t13a.log 2>&1
 rc=$?
 check "T13 fs exit 0" test "$rc" -eq 0
 check "T13 fs newcomer arrived" sudo zfs list -H "$DEST/d@n1"
@@ -263,7 +263,7 @@ sudo zfs create -V 16M ztest/src/vol
 wait_zvol /dev/zvol/ztest/src/vol
 sudo dd if=/dev/urandom of=/dev/zvol/ztest/src/vol bs=1M count=4 oflag=direct 2>/dev/null
 sudo zfs snapshot ztest/src/vol@vn1
-sudo /etc/zfsrecvd/send.sh ztest/src/vol@vn1 localhost >/tmp/t13b.log 2>&1
+sudo /usr/local/lib/stevedore/stevedore-send.sh ztest/src/vol@vn1 localhost >/tmp/t13b.log 2>&1
 rc=$?
 check "T13 zvol exit 0" test "$rc" -eq 0
 check "T13 zvol newcomer arrived" sudo zfs list -H "$DEST/vol@vn1"
@@ -276,7 +276,7 @@ echo "=== T14: cursor catch-up survives the collision pass (zero snap overlap) =
 # aside and force a full re-send
 sudo zfs list -H -t snapshot -d 1 -o name ztest/src/e | while read -r s; do sudo zfs destroy "$s"; done
 sudo zfs snapshot ztest/src/e@fresh
-sudo /etc/zfsrecvd/send.sh ztest/src/e@fresh localhost >/tmp/t14.log 2>&1
+sudo /usr/local/lib/stevedore/stevedore-send.sh ztest/src/e@fresh localhost >/tmp/t14.log 2>&1
 rc=$?
 check "T14 exit 0" test "$rc" -eq 0
 grep -q "(cursor catch-up)" /tmp/t14.log && ok "T14 catch-up path taken" || { bad "T14 catch-up"; cat /tmp/t14.log; }
@@ -287,7 +287,7 @@ check "T14 e@fresh arrived" sudo zfs list -H "$DEST/e@fresh"
 echo "=== T15: received-bytes ride the OK line ==="
 wb=$(grep -a "WIRE-BYTES:" /tmp/t13b.log | tail -n 1 | sed 's/.*WIRE-BYTES: //')
 if [ -n "$wb" ] && [ "$wb" -gt 0 ] 2>/dev/null; then ok "T15 wire bytes counted ($wb)"; else bad "T15 wire bytes (got '$wb')"; cat /tmp/t13b.log; fi
-sudo /etc/zfsrecvd/sendtree.sh ztest/src localhost >/tmp/t15.log 2>&1 || bad "T15 up-to-date run failed"
+sudo /usr/local/lib/stevedore/stevedore-sendtree.sh ztest/src localhost >/tmp/t15.log 2>&1 || bad "T15 up-to-date run failed"
 grep -q "WIRE-BYTES: 0" /tmp/t15.log && ok "T15 up-to-date run counts zero" || { bad "T15 zero"; grep -a "WIRE-BYTES" /tmp/t15.log; }
 
 echo "=== T16: manifest-driven orphan clocks + received-source stamps ==="
@@ -298,7 +298,7 @@ os=$(sudo zfs get -H -s local -o value zfsrecvd:orphan-since "$gds" 2>/dev/null)
 if [ -n "$os" ] && [ "$os" != "-" ]; then ok "T16 renamed-aside tree clocked"; else bad "T16 .gone unclocked (got '$os')"; fi
 # reappearance clears: stamp a live dataset, run, the clock must be gone
 sudo zfs set zfsrecvd:orphan-since=2026-01-01T00:00:00Z "$DEST/b"
-sudo /etc/zfsrecvd/sendtree.sh ztest/src localhost >/tmp/t16.log 2>&1 || bad "T16 run failed"
+sudo /usr/local/lib/stevedore/stevedore-sendtree.sh ztest/src localhost >/tmp/t16.log 2>&1 || bad "T16 run failed"
 os2=$(sudo zfs get -H -s local,received -o value zfsrecvd:orphan-since "$DEST/b" 2>/dev/null)
 if [ -z "$os2" ] || [ "$os2" = "-" ]; then ok "T16 reappearance cleared the clock"; else bad "T16 clock survived ($os2)"; fi
 # received-source mechanics (§17 corollary): a stamp that crossed a

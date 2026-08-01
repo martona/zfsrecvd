@@ -4,7 +4,7 @@
 # Pure bash -- no zfs, no network; runs on any dev box: ./test-fleetparser.sh
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FP="$HERE/fleetparser.sh"
+FP="$HERE/stevedore-fleetparser.sh"
 FX=$(mktemp -d)
 trap 'rm -rf "$FX"' EXIT
 PASS=0; FAIL=0

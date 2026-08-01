@@ -6,7 +6,7 @@
 # real haproxy emits, so a misreading of the spec cannot hide here.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PP="$HERE/pp2.sh"
+PP="$HERE/stevedore-pp2.sh"
 PASS=0; FAIL=0
 ok()  { echo "PASS: $*"; PASS=$((PASS+1)); }
 bad() { echo "FAIL: $*"; FAIL=$((FAIL+1)); }

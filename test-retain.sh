@@ -5,7 +5,7 @@
 # 27/28/29 share one ISO week and Jun 30 is in the prior week/month.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$HERE/retain.sh"
+source "$HERE/stevedore-retain.sh"
 PASS=0; FAIL=0
 ok()  { echo "PASS: $*"; PASS=$((PASS+1)); }
 bad() { echo "FAIL: $*"; FAIL=$((FAIL+1)); }

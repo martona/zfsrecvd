@@ -21,7 +21,7 @@ cat > "$FX/runs.jsonl" <<'EOF'
 {"ts":"2026-07-30T01:01:00Z","kind":"run","run":"run-B","rc":2,"recv":[{"id":"berg","before":2024,"after":4072,"avail":4990000,"pruned":512},{"id":"cp4","before":800,"after":800,"avail":900000,"pruned":0}],"src":[{"id":"jup","tree":"tank/a","used":200000,"avail":700000}],"gc":[{"id":"berg","gc":"tank/recv/x/gone: ORPHAN CANDIDATE -- 42d behind siblings; eligible in 48d"},{"id":"berg","gc":"track tank/recv/x/dev@codex: unknown-since 2026-07-30T00:00:00Z; eligible in 89d"},{"id":"cp4","gc":"all quiet: 1 client(s), 3 datasets, everything fresh"}]}
 EOF
 
-out=$(bash "$HERE/report.sh" -f "$FX/runs.jsonl" 2>&1)
+out=$(bash "$HERE/stevedore-report.sh" -f "$FX/runs.jsonl" 2>&1)
 rc=$?
 [[ $rc -eq 0 ]] && ok "renders rc=0" || { bad "rc=$rc"; echo "$out"; }
 grep -q "last run: run-B" <<<"$out" && ok "latest run selected" || bad "latest: $out"
@@ -41,14 +41,14 @@ grep -qx "  jup     tank/a  195.3K  683.6K" <<<"$out" && ok "source row aligned"
 grep -q "gc \[berg\] tank/recv/x/gone: ORPHAN CANDIDATE" <<<"$out" && ok "gc warning rendered" || bad "gc warn: $out"
 grep -q "gc \[cp4\] all quiet: 1 client(s)" <<<"$out" && ok "gc all-quiet rendered" || bad "gc quiet: $out"
 grep -q "@codex" <<<"$out" && bad "gc track entry shown without --gc-debug" || ok "gc track hidden by default"
-outg=$(bash "$HERE/report.sh" --gc-debug -f "$FX/runs.jsonl" 2>&1)
+outg=$(bash "$HERE/stevedore-report.sh" --gc-debug -f "$FX/runs.jsonl" 2>&1)
 grep -q "gc \[berg\] track tank/recv/x/dev@codex: unknown-since" <<<"$outg" && ok "--gc-debug surfaces track inventory" || bad "gc-debug: $outg"
 grep -q "trend (last 2 run(s))" <<<"$out" && ok "trend window" || bad "trend hdr: $out"
 grep -qx "  berg      3.0K    612B" <<<"$out" && ok "trend sums aligned (berg)" || bad "trend berg: $out"
 grep -qx "  cp4       300B      0B" <<<"$out" && ok "trend sums aligned (cp4)" || bad "trend cp4: $out"
 grep -q "runs with nonzero rc: 1" <<<"$out" && ok "trend failure count" || bad "trend fails: $out"
 
-out1=$(bash "$HERE/report.sh" -n 1 -f "$FX/runs.jsonl" 2>&1)
+out1=$(bash "$HERE/stevedore-report.sh" -n 1 -f "$FX/runs.jsonl" 2>&1)
 grep -q "trend (last 1 run(s))" <<<"$out1" && ok "-n limits window" || bad "-n: $out1"
 grep -qx "  berg      2.0K    512B" <<<"$out1" && ok "-n=1 sums only last" || bad "-n sums: $out1"
 
@@ -56,7 +56,7 @@ grep -qx "  berg      2.0K    512B" <<<"$out1" && ok "-n=1 sums only last" || ba
 cat > "$FX/old.jsonl" <<'EOF'
 {"ts":"2026-07-28T00:00:00Z","kind":"run","run":"run-old","rc":0,"recv":[{"id":"berg","before":0,"after":1024,"avail":2048,"pruned":0}],"src":[]}
 EOF
-out2=$(bash "$HERE/report.sh" -f "$FX/old.jsonl" 2>&1)
+out2=$(bash "$HERE/stevedore-report.sh" -f "$FX/old.jsonl" 2>&1)
 rc=$?
 [[ $rc -eq 0 && "$out2" == *"last run: run-old"* ]] && ok "gc-less record renders" || { bad "compat rc=$rc"; echo "$out2"; }
 grep -q "  gc \[" <<<"$out2" && bad "gc section on gc-less record" || ok "no gc section when absent"

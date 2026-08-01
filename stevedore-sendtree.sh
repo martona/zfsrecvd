@@ -4,8 +4,8 @@
 # snapshot+cursor guids, guid-veto replanning, received-bytes); a peer
 # greeting anything else is a config error and fails clean.
 #
-# Usage: sendtree.sh [--single] [--no-prune] <dataset[@snap]> <remote_host>
-#        sendtree.sh --prune-only <dataset>
+# Usage: stevedore-sendtree.sh [--single] [--no-prune] <dataset[@snap]> <remote_host>
+#        stevedore-sendtree.sh --prune-only <dataset>
 #   --single:     send only the named dataset, not its descendants (send.sh
 #                 execs into this for manual one-dataset runs).
 #   --no-prune:   skip the local prune pass. Orchestrated (T) runs use this:
@@ -27,7 +27,7 @@
 # dies we reconnect and replan; finished work shows up as up-to-date and
 # costs nothing the second time.
 #
-# Requires: /etc/zfsrecvd/{client.pem,client.key,ca.pem}, socat, pv.
+# Requires: <cert-dir>/{client.pem,client.key,ca.pem}, socat, pv.
 #
 # Exit: 0 all datasets ok (skips are warnings),
 #       2 some datasets failed,
@@ -35,7 +35,7 @@
 
 set -euo pipefail
 set -f                       # never glob; plenty of protocol word-splitting
-source /etc/zfsrecvd/cfgparser.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/stevedore-cfgparser.sh"
 
 # When we run under run_indented (see orchestrate.sh), every line we emit grows
 # by ZFSRECVD_INDENT columns of prefix before reaching the terminal. pv sizes

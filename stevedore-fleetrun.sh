@@ -17,54 +17,40 @@
 #      revocation story is CA abandonment at teardown, not expiry),
 #   3. generates per-host run configs (the CLASSIC format, consumed via
 #      the ZFSRECVD_CONF override -- sendtree/listen are unchanged),
-#   4. ships bundles to /etc/zfsrecvd/run/ on every participant,
+#   4. ships bundles to /run/stevedore/ on every participant (tmpfs: a
+#      reboot vaporizes the trust material and the listener together),
 #   5. starts an ephemeral listener (systemd-run unit "zfsrecvd-run") on
 #      every receiver, bound to the run CA,
-#   6. executes the run through orchestrate.sh's worker pool: one job per
-#      (source, tree, destination) row, scheduled per PROTOCOL.md §19,
-#   7. tears everything down: listeners stopped, /etc/zfsrecvd/run removed,
+#   6. executes the run through the orchestrator's worker pool: one job
+#      per (source, tree, destination) row, scheduled per PROTOCOL.md §19,
+#   7. tears everything down: listeners stopped, /run/stevedore removed,
 #      local run dir (including the CA key) deleted unless --keep.
 #
-# Static certs and each host's own /etc/zfsrecvd/zfsrecvd.conf are never
-# touched; manual send.sh runs keep working throughout.
+# Each host's own /etc/stevedore/stevedore.conf is never touched; manual
+# stevedore-send.sh runs keep working throughout.
 #
 # Exit: orchestrate's exit code (0/1/2), or 78 config, 75 busy, 1 provisioning.
 
 set -euo pipefail
 set -f
-source /etc/zfsrecvd/ec2helpers.sh
-source /etc/zfsrecvd/fleetparser.sh
+here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+source "$here/stevedore-paths.sh"
+source "$here/stevedore-ec2helpers.sh"
+source "$here/stevedore-fleetparser.sh"
 
-FLEET_CONF="/etc/zfsrecvd/fleet.conf"
+FLEET_CONF="$STEVE_ETC/fleet.conf"
 # Per-IDENTITY run dirs under this base: two identities can share one
 # physical host (sender + receiver roles, or test rigs) without their
 # bundles clobbering each other.
-RUN_REMOTE_BASE="/etc/zfsrecvd/run"
+RUN_REMOTE_BASE="$STEVE_RUN"
 
-# The scripts every participant gets refreshed with on every run, from
-# this orchestrator's /etc/zfsrecvd (keep in sync with deploy.sh's list).
-# Shipping them per run makes participants stateless: a brand-new sender
-# needs only ssh, sudo, and the packages (zfs, socat, pv) -- no
-# prior deploy.sh visit. --unlink-first so a script that is executing
-# right now is replaced via a fresh inode, never truncated.
-FLEET_SCRIPTS=(
-    cfgparser.sh
-    deploy.sh
-    ec2helpers.sh
-    fleetparser.sh
-    fleetrun.sh
-    gc.sh
-    listen.sh
-    orchestrate.sh
-    pp2.sh
-    report.sh
-    retain.sh
-    run_indented.sh
-    send.sh
-    sendtree.sh
-    unlock-replica.sh
-    zfsrecvd.sh
-)
+# Every participant gets the whole impl set (STEVE_FILES, the one list in
+# stevedore-paths.sh) refreshed on every run, from this fleetrun's own
+# directory -- so an installed orchestrator ships $STEVE_LIB and the VM
+# rig ships its checkout, with no separate install step on participants.
+# The remote target is ALWAYS $STEVE_LIB (the installed layout).
+# --unlink-first so a script that is executing right now is replaced via
+# a fresh inode, never truncated.
 check_only=""
 keep_rundir=""
 force_ec2=""
@@ -89,9 +75,9 @@ fi
 
 fleet_parse "$FLEET_CONF"
 
-for f in "${FLEET_SCRIPTS[@]}"; do
-    if [[ ! -f "/etc/zfsrecvd/$f" ]]; then
-        echo "ERROR: /etc/zfsrecvd/$f missing on the orchestrator; run install.sh first" >&2
+for f in "${STEVE_FILES[@]}"; do
+    if [[ ! -f "$here/$f" ]]; then
+        echo "ERROR: $here/$f missing on the orchestrator; incomplete install/checkout (sudo steve install)" >&2
         exit 1
     fi
 done
@@ -108,9 +94,9 @@ fleet_ssh() {   # <user@addr> <command...>
 
 report_dir=""
 report_dir_resolve() {
-    report_dir="/var/log/zfsrecvd"
+    report_dir="$STEVE_VAR"
     if ! mkdir -p "$report_dir" 2>/dev/null || [[ ! -w "$report_dir" ]]; then
-        report_dir="${XDG_STATE_HOME:-$HOME/.local/state}/zfsrecvd"
+        report_dir="${XDG_STATE_HOME:-$HOME/.local/state}/stevedore"
         mkdir -p "$report_dir" 2>/dev/null || report_dir=""
     fi
 }
@@ -188,8 +174,8 @@ if [[ -n "$has_cadence" && -n "$force_ec2" ]]; then
     echo "cadence: overridden by --force-ec2; every job runs" >&2
 fi
 if [[ -n "$has_cadence" && -z "$force_ec2" ]]; then
-    ledger="/var/log/zfsrecvd/runs.jsonl"
-    [[ -s "$ledger" ]] || ledger="${XDG_STATE_HOME:-$HOME/.local/state}/zfsrecvd/runs.jsonl"
+    ledger="$STEVE_VAR/runs.jsonl"
+    [[ -s "$ledger" ]] || ledger="${XDG_STATE_HOME:-$HOME/.local/state}/stevedore/runs.jsonl"
     declare -A last_ok=()
     if [[ -s "$ledger" ]]; then
         # newest done/rc=0 timestamp per job tuple, one awk pass; -F'"'
@@ -377,7 +363,7 @@ if (( ${#fleet_job_src[@]} == 0 )); then
     exit 0
 fi
 
-rundir=$(mktemp -d /tmp/zfsrecvd-fleet.XXXXXX)
+rundir=$(mktemp -d /tmp/stevedore-fleet.XXXXXX)
 provisioned=()
 listeners=()
 ha_started=()
@@ -600,10 +586,11 @@ provision_host() {   # $1 = host identity
         return 1
     fi
 
-    # refresh the scripts themselves: participants are stateless, no prior
-    # deploy.sh visit required, and version skew cannot exist within a run
-    if ! tar czf - -C /etc/zfsrecvd "${FLEET_SCRIPTS[@]}" | fleet_ssh "$dest" \
-        "sudo -n mkdir -p /etc/zfsrecvd && sudo -n tar xzf - -C /etc/zfsrecvd --unlink-first"; then
+    # refresh the scripts themselves: participants are stateless (no
+    # install step ever runs there), and version skew cannot exist within
+    # a run
+    if ! tar czf - -C "$here" "${STEVE_FILES[@]}" | fleet_ssh "$dest" \
+        "sudo -n mkdir -p $STEVE_LIB && sudo -n tar xzf - -C $STEVE_LIB --unlink-first"; then
         echo "ERROR: script ship to [$id] failed" >&2
         return 1
     fi
@@ -626,7 +613,7 @@ start_listener() {   # $1 = receiver identity
         bindpat="${fleet_host_bind[$id]}:$fleet_opt_port "
     fi
     echo "starting run listener on [$id] (port $fleet_opt_port)" >&2
-    fleet_ssh "$dest" "sudo -n systemctl stop $unit 2>/dev/null; sudo -n systemctl reset-failed $unit 2>/dev/null; sudo -n systemd-run --unit=$unit --setenv=ZFSRECVD_CONF=$RUN_REMOTE_BASE/$id/run.conf /etc/zfsrecvd/listen.sh >/dev/null 2>&1; for i in \$(seq 1 40); do ss -tln | grep -qF '$bindpat' && exit 0; sleep 0.25; done; echo 'run listener failed to bind:' >&2; sudo -n journalctl -u $unit -n 10 --no-pager >&2; exit 1" \
+    fleet_ssh "$dest" "sudo -n systemctl stop $unit 2>/dev/null; sudo -n systemctl reset-failed $unit 2>/dev/null; sudo -n systemd-run --unit=$unit --setenv=ZFSRECVD_CONF=$RUN_REMOTE_BASE/$id/run.conf $STEVE_LIB/stevedore-listen.sh >/dev/null 2>&1; for i in \$(seq 1 40); do ss -tln | grep -qF '$bindpat' && exit 0; sleep 0.25; done; echo 'run listener failed to bind:' >&2; sudo -n journalctl -u $unit -n 10 --no-pager >&2; exit 1" \
         </dev/null || return 1
     listeners+=( "$id" )
 }
@@ -773,7 +760,7 @@ fi
 echo "executing run $run_id" >&2
 set +e
 ZFSRECVD_CONF="$rundir/orchestrator.conf" \
-    /etc/zfsrecvd/orchestrate.sh "${orch_args[@]}"
+    "$here/stevedore-orchestrate.sh" "${orch_args[@]}"
 orch_rc=$?
 set -e
 
@@ -804,7 +791,7 @@ for h in "${fleet_receivers[@]}"; do
     # re-echoed verbatim -- the console keeps every line in every mode
     gout=""
     if ! gout=$(fleet_ssh "$(fleet_ssh_dest "$h")" \
-        "sudo -n env ZFSRECVD_CONF=$RUN_REMOTE_BASE/$h/run.conf$gcenv /etc/zfsrecvd/gc.sh" \
+        "sudo -n env ZFSRECVD_CONF=$RUN_REMOTE_BASE/$h/run.conf$gcenv $STEVE_LIB/stevedore-gc.sh" \
         </dev/null); then
         echo "WARNING: gc pass failed on [$h]" >&2
     fi

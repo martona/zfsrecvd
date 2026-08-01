@@ -22,12 +22,12 @@ DEST2="ztest/recv2/$CN/ztest/src"
 echo "=== setup ==="
 sudo systemctl stop "zfsrecvd-run-*" "zfsrecvd-ha-*" zfsrecvd-test 2>/dev/null
 sudo systemctl reset-failed "zfsrecvd-run-*" "zfsrecvd-ha-*" zfsrecvd-test 2>/dev/null
-rm -rf /tmp/zfsrecvd-fleet.* 2>/dev/null
+rm -rf /tmp/stevedore-fleet.* 2>/dev/null
 sleep 0.5
 sudo zpool destroy ztest 2>/dev/null
 sudo rm -rf /dev/zvol/ztest 2>/dev/null
 sudo rm -f /var/tmp/ztest.img
-sudo rm -rf /etc/zfsrecvd/run
+sudo rm -rf /run/stevedore
 sudo truncate -s 8G /var/tmp/ztest.img
 sudo zpool create -f -O mountpoint=none ztest /var/tmp/ztest.img || { echo "pool create failed"; exit 1; }
 sudo zfs create ztest/recv
@@ -38,10 +38,10 @@ sudo zfs create -V 16M ztest/src/vol
 for _ in $(seq 1 50); do [ -b /dev/zvol/ztest/src/vol ] && break; sleep 0.2; done
 sudo dd if=/dev/urandom of=/dev/zvol/ztest/src/vol bs=1M count=8 oflag=direct 2>/dev/null
 
-sudo bash ~/zfsrecvd-src/install.sh >/dev/null
+sudo bash ~/zfsrecvd-src/stevedore.sh install >/dev/null
 
 # static conf + certs so the LEGACY listener can run on 5299 (coexistence)
-sudo tee /etc/zfsrecvd/zfsrecvd.conf >/dev/null <<EOF
+sudo tee /etc/stevedore/stevedore.conf >/dev/null <<EOF
 [recv-root]
 ztest/recv
 [tcp-port]
@@ -52,7 +52,7 @@ ztest/recv
 $CN
 EOF
 sudo bash -c '
-cd /etc/zfsrecvd
+cd /etc/stevedore
 openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.pem -days 2 -subj "/CN=static-test-ca" 2>/dev/null
 openssl req -newkey rsa:2048 -nodes -keyout server.key -out server.csr -subj "/CN=localhost" 2>/dev/null
 openssl x509 -req -in server.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 2 -out server.pem 2>/dev/null
@@ -60,10 +60,10 @@ openssl req -newkey rsa:2048 -nodes -keyout client.key -out client.csr -subj "/C
 openssl x509 -req -in client.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 2 -out client.pem 2>/dev/null
 chmod 600 *.key
 '
-sudo systemd-run --unit=zfsrecvd-test /etc/zfsrecvd/listen.sh >/dev/null 2>&1
+sudo systemd-run --unit=zfsrecvd-test /usr/local/lib/stevedore/stevedore-listen.sh >/dev/null 2>&1
 sleep 1
 check "legacy listener up on 5299" bash -c 'ss -tln | grep -q ":5299 "'
-static_sum=$(sudo sha256sum /etc/zfsrecvd/client.pem /etc/zfsrecvd/server.pem /etc/zfsrecvd/ca.pem | sha256sum)
+static_sum=$(sudo sha256sum /etc/stevedore/client.pem /etc/stevedore/server.pem /etc/stevedore/ca.pem | sha256sum)
 
 # no ssh-keyscan needed: fleet ssh ignores known_hosts entirely (ssh_opts
 # in ec2helpers.sh) -- that behavior is itself under test here
@@ -87,14 +87,14 @@ $CN   ztest/src   vmrecv2
 EOF
 
 echo "=== T1: --check plan ==="
-out=$(/etc/zfsrecvd/fleetrun.sh -c ~/fleet-test.conf --check 2>&1)
+out=$(/usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-test.conf --check 2>&1)
 rc=$?
 check "T1 check rc=0" test "$rc" -eq 0
 grep -q "2 jobs, sources: $CN, receivers: vmrecv vmrecv2" <<<"$out" && ok "T1 plan content" || { bad "T1 plan content"; echo "$out"; }
 
 echo "=== T2: bad config rejected ==="
 sed 's/vmrecv$/vmrcev/' ~/fleet-test.conf > ~/fleet-bad.conf
-out=$(/etc/zfsrecvd/fleetrun.sh -c ~/fleet-bad.conf --check 2>&1)
+out=$(/usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-bad.conf --check 2>&1)
 rc=$?
 check "T2 rc=78" test "$rc" -eq 78
 grep -q "no recv=" <<<"$out" && ok "T2 message" || { bad "T2 message"; echo "$out"; }
@@ -103,11 +103,11 @@ echo "=== T3: full fleet run, one tree fanned out to two receivers ==="
 # scripts must be shipped by the run itself (participants need no prior
 # deploy). Single-box rig: ship source == target, so mtime/content can't
 # prove anything -- but --unlink-first guarantees a fresh inode.
-ino_before=$(stat -c %i /etc/zfsrecvd/sendtree.sh)
-/etc/zfsrecvd/fleetrun.sh -c ~/fleet-test.conf >/tmp/fleet1.log 2>&1
+ino_before=$(stat -c %i /usr/local/lib/stevedore/stevedore-sendtree.sh)
+/usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-test.conf >/tmp/fleet1.log 2>&1
 rc=$?
 check "T3 rc=0" test "$rc" -eq 0
-check "T3 scripts shipped with run" bash -c "[ \"\$(stat -c %i /etc/zfsrecvd/sendtree.sh)\" != \"$ino_before\" ]"
+check "T3 scripts shipped with run" bash -c "[ \"\$(stat -c %i /usr/local/lib/stevedore/stevedore-sendtree.sh)\" != \"$ino_before\" ]"
 check "T3 data arrived"        sudo zfs list -H "$DEST"
 check "T3 deep child arrived"  bash -c "sudo zfs list -H -t snapshot -d 1 -o name $DEST/a/deep | grep -q zfsrecvd-"
 check "T3 zvol arrived"        bash -c "sudo zfs list -H -t snapshot -d 1 -o name $DEST/vol | grep -q zfsrecvd-"
@@ -117,18 +117,18 @@ check "T3 second dest stamp"   bash -c "[ \"\$(sudo zfs get -H -o value zfsrecvd
 grep -q "0 failed" /tmp/fleet1.log && ok "T3 no failures reported" || { bad "T3 failures"; tail -n 30 /tmp/fleet1.log; }
 
 echo "=== T4: teardown left nothing behind ==="
-check "T4 run dir removed"     bash -c "! sudo test -e /etc/zfsrecvd/run"
+check "T4 run dir removed"     bash -c "! sudo test -e /run/stevedore"
 check "T4 run listeners gone"  bash -c "! ss -tln | grep -q ':$RUNPORT '"
 check "T4 unit inactive"       bash -c "! systemctl is-active --quiet zfsrecvd-run-vmrecv"
 check "T4 unit2 inactive"      bash -c "! systemctl is-active --quiet zfsrecvd-run-vmrecv2"
-check "T4 local rundirs gone"  bash -c "! ls -d /tmp/zfsrecvd-fleet.* 2>/dev/null | grep -q ."
-static_sum2=$(sudo sha256sum /etc/zfsrecvd/client.pem /etc/zfsrecvd/server.pem /etc/zfsrecvd/ca.pem | sha256sum)
+check "T4 local rundirs gone"  bash -c "! ls -d /tmp/stevedore-fleet.* 2>/dev/null | grep -q ."
+static_sum2=$(sudo sha256sum /etc/stevedore/client.pem /etc/stevedore/server.pem /etc/stevedore/ca.pem | sha256sum)
 check "T4 static certs untouched" test "$static_sum" = "$static_sum2"
 check "T4 legacy listener still up" bash -c 'ss -tln | grep -q ":5299 "'
 check "T4 teardown quiet (no spurious warnings)" bash -c "! grep -q 'WARNING.*still active' /tmp/fleet1.log && ! grep -q 'could not stop' /tmp/fleet1.log"
 
 echo "=== T5: immediate rerun (same minute): idempotent, all up to date ==="
-/etc/zfsrecvd/fleetrun.sh -c ~/fleet-test.conf >/tmp/fleet2.log 2>&1
+/usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-test.conf >/tmp/fleet2.log 2>&1
 rc=$?
 check "T5 rc=0" test "$rc" -eq 0
 grep -q "0 failed" /tmp/fleet2.log && ok "T5 clean" || { bad "T5 failures"; tail -n 30 /tmp/fleet2.log; }
@@ -137,7 +137,7 @@ echo "=== T6: next-minute run with new data: incrementals land on both ==="
 last_min=$(date +%H%M)
 for _ in $(seq 1 130); do [ "$(date +%H%M)" != "$last_min" ] && break; sleep 1; done
 sudo dd if=/dev/urandom of=/dev/zvol/ztest/src/vol bs=1M count=4 oflag=direct 2>/dev/null
-/etc/zfsrecvd/fleetrun.sh -c ~/fleet-test.conf >/tmp/fleet3.log 2>&1
+/usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-test.conf >/tmp/fleet3.log 2>&1
 rc=$?
 check "T6 rc=0" test "$rc" -eq 0
 grep -q "0 failed" /tmp/fleet3.log && ok "T6 clean" || { bad "T6 failures"; tail -n 30 /tmp/fleet3.log; }
@@ -147,10 +147,10 @@ n_snaps2=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST2" | grep -c zfsrecvd
 check "T6 two run snapshots on dest2 (got $n_snaps2)" test "$n_snaps2" -ge 2
 
 echo "=== T7: generated artifacts: retention keep-counts, jobs, workers ==="
-/etc/zfsrecvd/fleetrun.sh -c ~/fleet-test.conf --keep >/tmp/fleet4.log 2>&1
+/usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-test.conf --keep >/tmp/fleet4.log 2>&1
 rc=$?
 check "T7 rc=0" test "$rc" -eq 0
-kdir=$(ls -dt /tmp/zfsrecvd-fleet.* 2>/dev/null | head -n 1)
+kdir=$(ls -dt /tmp/stevedore-fleet.* 2>/dev/null | head -n 1)
 snd_kc=$(grep -A1 '^\[keep-count\]' "$kdir/bundle-$CN/run.conf" 2>/dev/null | tail -n 1)
 rcv_kc=$(grep -A1 '^\[keep-count\]' "$kdir/bundle-vmrecv/run.conf" 2>/dev/null | tail -n 1)
 check "T7 sender keep-count=24 (got ${snd_kc:-none})"   test "$snd_kc" = "24"
@@ -159,14 +159,14 @@ n_jobs=$(grep -c "^$CN " "$kdir/orchestrator.conf" 2>/dev/null)
 check "T7 two job rows generated (got ${n_jobs:-0})" test "$n_jobs" = "2"
 n_workers=$(grep -A1 '^\[orchestrator-workers\]' "$kdir/orchestrator.conf" 2>/dev/null | tail -n 1)
 check "T7 workers default 8 (got ${n_workers:-none})" test "$n_workers" = "8"
-rm -rf /tmp/zfsrecvd-fleet.*
+rm -rf /tmp/stevedore-fleet.*
 
 echo "=== T8: prune-post trims the source, receivers keep history ==="
 # source hourly bucket -> keep-count 1: after the run, prune-post must
 # leave exactly one run snapshot on the source tree, while the receivers
 # (hourly=48) retain everything received so far.
 sed 's/hourly=24/hourly=1/' ~/fleet-test.conf > ~/fleet-prune.conf
-/etc/zfsrecvd/fleetrun.sh -c ~/fleet-prune.conf >/tmp/fleet5.log 2>&1
+/usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-prune.conf >/tmp/fleet5.log 2>&1
 rc=$?
 check "T8 rc=0" test "$rc" -eq 0
 n_src=$(sudo zfs list -H -t snapshot -d 1 -o name ztest/src | grep -c zfsrecvd-)
@@ -182,7 +182,7 @@ echo "=== T9: offline participant is dropped, the rest of the run proceeds ==="
 # "dead" host would provision onto the VM itself.)
 sed '/^vmrecv2/a deadhost  ssh=nosuchuser@localhost   recv=ztest/recv' ~/fleet-test.conf > ~/fleet-offline.conf
 echo "$CN   ztest/src   deadhost" >> ~/fleet-offline.conf
-/etc/zfsrecvd/fleetrun.sh -c ~/fleet-offline.conf >/tmp/fleet6.log 2>&1
+/usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-offline.conf >/tmp/fleet6.log 2>&1
 rc=$?
 check "T9 rc=1 (degraded run)" test "$rc" -eq 1
 grep -q "dropping its jobs" /tmp/fleet6.log && ok "T9 offline host dropped" || { bad "T9 drop message"; tail -n 20 /tmp/fleet6.log; }
@@ -196,7 +196,7 @@ sed '/^port/a transport   haproxy' ~/fleet-test.conf > ~/fleet-ha.conf
 last_min=$(date +%H%M)
 for _ in $(seq 1 130); do [ "$(date +%H%M)" != "$last_min" ] && break; sleep 1; done
 sudo dd if=/dev/urandom of=/dev/zvol/ztest/src/vol bs=1M count=4 oflag=direct 2>/dev/null
-/etc/zfsrecvd/fleetrun.sh -c ~/fleet-ha.conf >/tmp/fleet7.log 2>&1
+/usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-ha.conf >/tmp/fleet7.log 2>&1
 rc=$?
 check "T10 rc=0" test "$rc" -eq 0
 grep -q "0 failed" /tmp/fleet7.log && ok "T10 clean" || { bad "T10 failures"; tail -n 40 /tmp/fleet7.log; }
@@ -223,7 +223,7 @@ sudo zfs snapshot "$DEST@zfsrecvd-2026-07-28-0900Z"
 sudo zfs snapshot "$DEST@keepme-manual"
 sed 's/^destination.*/destination   hourly=1/' ~/fleet-test.conf > ~/fleet-grid.conf
 pre=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST" | grep -c zfsrecvd-)
-ZFSRECVD_SHOW_PRUNES=1 /etc/zfsrecvd/fleetrun.sh -c ~/fleet-grid.conf >/tmp/fleet8.log 2>&1
+ZFSRECVD_SHOW_PRUNES=1 /usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-grid.conf >/tmp/fleet8.log 2>&1
 rc=$?
 check "T12 rc=0" test "$rc" -eq 0
 grep -q "0 failed" /tmp/fleet8.log && ok "T12 clean" || { bad "T12 failures"; tail -n 30 /tmp/fleet8.log; }
@@ -237,7 +237,7 @@ us=$(sudo zfs get -H -s local -o value zfsrecvd:unknown-since "$DEST@keepme-manu
 if [ -n "$us" ] && [ "$us" != "-" ]; then ok "T12 manual snap stamped unknown-since"; else bad "T12 stamp missing (got '$us')"; fi
 grep -q "^GC-TRACK: " /tmp/fleet8.log && bad "T12 track lines leaked to console" || ok "T12 track lines off the console"
 grep -q "gc: \[vmrecv\]" /tmp/fleet8.log && ok "T12 gc stage ran" || { bad "T12 gc stage"; tail -n 20 /tmp/fleet8.log; }
-RJ="${XDG_STATE_HOME:-$HOME/.local/state}/zfsrecvd/runs.jsonl"
+RJ="/var/lib/stevedore/runs.jsonl"
 check "T12 runs.jsonl written" test -s "$RJ"
 grep -q '"state":"done","rc":"0"' "$RJ" && ok "T12 jsonl records ok jobs" || { bad "T12 jsonl content"; tail -n 3 "$RJ"; }
 grep -qF '{"id":"vmrecv","before":' "$RJ" && ok "T12 jsonl recv space data" || { bad "T12 recv data"; tail -n 2 "$RJ"; }
@@ -247,10 +247,10 @@ grep -q "GC:   all quiet:" /tmp/fleet8.log && ok "T12 gc all-quiet rollup" || { 
 grep -qF '","gc":"' "$RJ" && ok "T12 gc harvested into jsonl" || { bad "T12 gc jsonl"; tail -n 1 "$RJ"; }
 grep -qF "{\"id\":\"$CN\",\"tree\":\"ztest/src\"" "$RJ" && ok "T12 jsonl source space data" || { bad "T12 src data"; tail -n 1 "$RJ"; }
 grep -qF '"gc":"track ' "$RJ" && ok "T12 track inventory in jsonl" || { bad "T12 track jsonl"; tail -n 1 "$RJ"; }
-rout=$(/etc/zfsrecvd/report.sh 2>/dev/null)
-grep -q "last run: run-" <<<"$rout" && ok "T12 report.sh renders" || { bad "T12 report.sh"; /etc/zfsrecvd/report.sh 2>&1 | head -n 5; }
+rout=$(/usr/local/lib/stevedore/stevedore-report.sh 2>/dev/null)
+grep -q "last run: run-" <<<"$rout" && ok "T12 report.sh renders" || { bad "T12 report.sh"; /usr/local/lib/stevedore/stevedore-report.sh 2>&1 | head -n 5; }
 grep -q "track .*@keepme-manual" <<<"$rout" && bad "T12 track shown without --gc-debug" || ok "T12 track hidden by default"
-rdbg=$(/etc/zfsrecvd/report.sh --gc-debug 2>/dev/null)
+rdbg=$(/usr/local/lib/stevedore/stevedore-report.sh --gc-debug 2>/dev/null)
 grep -q "gc \[vmrecv\] track .*@keepme-manual: unknown-since" <<<"$rdbg" && ok "T12 --gc-debug surfaces the inventory" || { bad "T12 gc-debug"; grep "gc \[" <<<"$rdbg" | head -n 6; }
 grep -qE "^  receiver +net +pruned +avail$" <<<"$rout" && ok "T12 report.sh receiver table" || { bad "T12 recv table"; echo "$rout" | head -n 12; }
 grep -q "  gc \[" <<<"$rout" && ok "T12 report.sh gc section" || { bad "T12 gc section"; echo "$rout" | head -n 20; }
@@ -268,7 +268,7 @@ echo "=== T14: cursor catch-up after total source snapshot loss ==="
 sudo zfs list -H -t snapshot -r -o name ztest/src | while read -r s; do sudo zfs destroy "$s"; done
 last_min=$(date +%H%M)
 for _ in $(seq 1 130); do [ "$(date +%H%M)" != "$last_min" ] && break; sleep 1; done
-/etc/zfsrecvd/fleetrun.sh -c ~/fleet-test.conf >/tmp/fleet9.log 2>&1
+/usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-test.conf >/tmp/fleet9.log 2>&1
 rc=$?
 check "T14 rc=0" test "$rc" -eq 0
 grep -q "0 failed" /tmp/fleet9.log && ok "T14 clean" || { bad "T14 failures"; tail -n 40 /tmp/fleet9.log; }
@@ -288,21 +288,21 @@ sudo zfs set "zfsrecvd:orphan-since=$(date -u +%Y-%m-%dT%H:%M:%SZ)" ztest/recv/$
 # (§5) and stay in the UNSTAMPED listing instead of being clocked.
 sudo zfs create "$DEST/deepcrap"
 sudo zfs snapshot "$DEST/deepcrap@junk"
-out=$(sudo env ZFSRECVD_CONF=/etc/zfsrecvd/zfsrecvd.conf /etc/zfsrecvd/gc.sh 2>&1)
+out=$(sudo env ZFSRECVD_CONF=/etc/stevedore/stevedore.conf /usr/local/lib/stevedore/stevedore-gc.sh 2>&1)
 grep -q "oldcrap: UNSTAMPED" <<<"$out" && ok "T15 unstamped crap surfaced" || { bad "T15 unstamped"; echo "$out"; }
 grep -q "deepcrap: UNSTAMPED" <<<"$out" && ok "T15 deep unstamped not cloaked by inheritance" || { bad "T15 deepcrap"; echo "$out"; }
 grep -q "/ztest: UNSTAMPED" <<<"$out" && bad "T15 container noise" || ok "T15 containers stay quiet"
 grep -q "stale: ABSENT AT SOURCE" <<<"$out" && bad "T15 warned inside the quiet window" || ok "T15 day-0 clock quiet on console"
 grep -q "GC-TRACK: ztest/recv/$CN/stale: orphan-since" <<<"$out" && ok "T15 clock tracked from day 0" || { bad "T15 track"; echo "$out"; }
-out2=$(sudo env ZFSRECVD_GC_WARN_DAYS=0 ZFSRECVD_CONF=/etc/zfsrecvd/zfsrecvd.conf /etc/zfsrecvd/gc.sh 2>&1)
+out2=$(sudo env ZFSRECVD_GC_WARN_DAYS=0 ZFSRECVD_CONF=/etc/stevedore/stevedore.conf /usr/local/lib/stevedore/stevedore-gc.sh 2>&1)
 grep -q "stale: ABSENT AT SOURCE -- since .*eligible for reclaim in" <<<"$out2" && ok "T15 warn knob brings the click forward" || { bad "T15 warn knob"; echo "$out2"; }
 grep -q "datasets, newest recv" <<<"$out2" && ok "T15 warned CN gets its summary line" || { bad "T15 summary"; echo "$out2"; }
-out3=$(sudo env ZFSRECVD_GC_GRACE_DAYS=0 ZFSRECVD_CONF=/etc/zfsrecvd/zfsrecvd.conf /etc/zfsrecvd/gc.sh 2>&1)
+out3=$(sudo env ZFSRECVD_GC_GRACE_DAYS=0 ZFSRECVD_CONF=/etc/stevedore/stevedore.conf /usr/local/lib/stevedore/stevedore-gc.sh 2>&1)
 grep -q "stale: RECLAIM-ELIGIBLE" <<<"$out3" && ok "T15 grace knob turns down" || { bad "T15 knob"; echo "$out3"; }
 check "T15 nothing destroyed" sudo zfs list -H ztest/recv/$CN/oldcrap ztest/recv/$CN/stale
 
 echo "=== T16: GC knobs forward through fleetrun over ssh ==="
-ZFSRECVD_GC_WARN_DAYS=0 ZFSRECVD_GC_GRACE_DAYS=0 /etc/zfsrecvd/fleetrun.sh -c ~/fleet-test.conf >/tmp/fleet10.log 2>&1
+ZFSRECVD_GC_WARN_DAYS=0 ZFSRECVD_GC_GRACE_DAYS=0 /usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-test.conf >/tmp/fleet10.log 2>&1
 rc=$?
 check "T16 rc=0" test "$rc" -eq 0
 grep -q "stale: RECLAIM-ELIGIBLE" /tmp/fleet10.log && ok "T16 knobs reached the receiver" || { bad "T16 knobs"; grep -a "GC:" /tmp/fleet10.log | head -n 8; }
@@ -316,17 +316,17 @@ echo "=== T17: ec2 cadence: fresh destinations skip; --force-ec2 overrides ==="
 # the skipped host is not provisioned at all (the EC2-wake-skip path is
 # the same structural exclusion; the rig has no ec2= host to prove it on).
 sed 's/^vmrecv2 /vmrecv2 cadence=24h /' ~/fleet-test.conf > ~/fleet-cad.conf
-/etc/zfsrecvd/fleetrun.sh -c ~/fleet-cad.conf >/tmp/fleet11.log 2>&1
+/usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-cad.conf >/tmp/fleet11.log 2>&1
 rc=$?
 check "T17 rc=0 (skip is not a failure)" test "$rc" -eq 0
 grep -q "cadence: \[vmrecv2\] 1 job(s) within 24h" /tmp/fleet11.log && ok "T17 skip announced" || { bad "T17 announce"; grep -a "cadence" /tmp/fleet11.log; }
 grep -q "starting run listener on \[vmrecv2\]" /tmp/fleet11.log && bad "T17 skipped host was provisioned" || ok "T17 skipped host left alone"
 grep -q "0 failed" /tmp/fleet11.log && ok "T17 surviving jobs clean" || { bad "T17 failures"; tail -n 20 /tmp/fleet11.log; }
 grep -qF '"dst":"vmrecv2","state":"cadence"' "$RJ" && ok "T17 cadence state in jsonl" || { bad "T17 jsonl"; tail -n 3 "$RJ"; }
-/etc/zfsrecvd/report.sh 2>/dev/null | grep -q "1 within cadence" && ok "T17 report shows the skip" || { bad "T17 report"; /etc/zfsrecvd/report.sh 2>&1 | head -n 8; }
+/usr/local/lib/stevedore/stevedore-report.sh 2>/dev/null | grep -q "1 within cadence" && ok "T17 report shows the skip" || { bad "T17 report"; /usr/local/lib/stevedore/stevedore-report.sh 2>&1 | head -n 8; }
 
 # --force-ec2 overrides the window
-/etc/zfsrecvd/fleetrun.sh --force-ec2 -c ~/fleet-cad.conf >/tmp/fleet12.log 2>&1
+/usr/local/lib/stevedore/stevedore-fleetrun.sh --force-ec2 -c ~/fleet-cad.conf >/tmp/fleet12.log 2>&1
 rc=$?
 check "T17 force rc=0" test "$rc" -eq 0
 grep -q "cadence: overridden by --force-ec2" /tmp/fleet12.log && ok "T17 override announced" || { bad "T17 override"; grep -a "cadence" /tmp/fleet12.log; }
@@ -336,12 +336,12 @@ grep -q "0 failed" /tmp/fleet12.log && ok "T17 forced run clean" || { bad "T17 f
 # cadence on BOTH receivers: the whole run is a policy no-op, rc 0; the
 # ledger stays grouped (cadence lines + a bare run record follow them)
 sed -e 's/^vmrecv /vmrecv cadence=24h /' -e 's/^vmrecv2 /vmrecv2 cadence=24h /' ~/fleet-test.conf > ~/fleet-cad2.conf
-/etc/zfsrecvd/fleetrun.sh -c ~/fleet-cad2.conf >/tmp/fleet13.log 2>&1
+/usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-cad2.conf >/tmp/fleet13.log 2>&1
 rc=$?
 check "T17 all-skip rc=0" test "$rc" -eq 0
 grep -q "nothing to do" /tmp/fleet13.log && ok "T17 all-skip announced" || { bad "T17 all-skip"; tail -n 10 /tmp/fleet13.log; }
 grep -q "minted run CA" /tmp/fleet13.log && bad "T17 all-skip still provisioned" || ok "T17 all-skip provisions nothing"
-/etc/zfsrecvd/report.sh 2>/dev/null | grep -q "0 ok, 0 not ok, 2 within cadence" && ok "T17 all-skip report tally" || { bad "T17 tally"; /etc/zfsrecvd/report.sh 2>&1 | head -n 5; }
+/usr/local/lib/stevedore/stevedore-report.sh 2>/dev/null | grep -q "0 ok, 0 not ok, 2 within cadence" && ok "T17 all-skip report tally" || { bad "T17 tally"; /usr/local/lib/stevedore/stevedore-report.sh 2>&1 | head -n 5; }
 
 # an UNREACHABLE source with a stale tuple must not force the wake
 # (owner: sometimes-offline sources would otherwise keep EC2 awake
@@ -349,19 +349,19 @@ grep -q "minted run CA" /tmp/fleet13.log && bad "T17 all-skip still provisioned"
 # nosuchuser@localhost refuses auth instantly (T9 precedent).
 cp ~/fleet-cad.conf ~/fleet-cad3.conf
 printf '[hosts]\nnosuchsrc ssh=nosuchuser@localhost\n[jobs]\nnosuchsrc ztest/src vmrecv2\n' >> ~/fleet-cad3.conf
-/etc/zfsrecvd/fleetrun.sh -c ~/fleet-cad3.conf >/tmp/fleet15.log 2>&1
+/usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-cad3.conf >/tmp/fleet15.log 2>&1
 rc=$?
 check "T17 offline-source rc=0" test "$rc" -eq 0
 grep -q "cadence: source \[nosuchsrc\] unreachable" /tmp/fleet15.log && ok "T17 offline source announced" || { bad "T17 offline announce"; grep -a "cadence" /tmp/fleet15.log; }
 grep -q "starting run listener on \[vmrecv2\]" /tmp/fleet15.log && bad "T17 offline-source dest still provisioned" || ok "T17 offline-source dest stays asleep"
 grep -qF '"src":"nosuchsrc","tree":"ztest/src","dst":"vmrecv2","state":"cadence","rc":"0","why":"source unreachable' "$RJ" && ok "T17 offline skip in jsonl" || { bad "T17 offline jsonl"; tail -n 4 "$RJ"; }
-/etc/zfsrecvd/report.sh 2>/dev/null | grep -q "1 within cadence, 1 source offline" && ok "T17 report splits offline from cadence" || { bad "T17 offline tally"; /etc/zfsrecvd/report.sh 2>&1 | head -n 8; }
+/usr/local/lib/stevedore/stevedore-report.sh 2>/dev/null | grep -q "1 within cadence, 1 source offline" && ok "T17 report splits offline from cadence" || { bad "T17 offline tally"; /usr/local/lib/stevedore/stevedore-report.sh 2>&1 | head -n 8; }
 grep -q "0 failed" /tmp/fleet15.log && ok "T17 offline-source run clean" || { bad "T17 offline failures"; tail -n 20 /tmp/fleet15.log; }
 
 # age the whole ledger out of the window (ISO ts compares as a string;
 # 19xx loses to any cutoff): everything runs again
 sed -i 's/"ts":"20/"ts":"19/g' "$RJ"
-/etc/zfsrecvd/fleetrun.sh -c ~/fleet-cad.conf >/tmp/fleet14.log 2>&1
+/usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-cad.conf >/tmp/fleet14.log 2>&1
 rc=$?
 check "T17 expired-window rc=0" test "$rc" -eq 0
 grep -q "cadence: \[vmrecv2\]" /tmp/fleet14.log && bad "T17 expired window still skipped" || ok "T17 expired window runs again"
@@ -373,22 +373,22 @@ echo "=== T18: --skip-ec2 drops ec2= destinations outright ==="
 # wake set is derived (no aws call ever happens -- the rig has no aws
 # cli, so a leak here would fail loudly) and leave it unprovisioned.
 sed 's/^vmrecv2 /vmrecv2 ec2=i-00000000 /' ~/fleet-test.conf > ~/fleet-skipec2.conf
-/etc/zfsrecvd/fleetrun.sh --skip-ec2 -c ~/fleet-skipec2.conf >/tmp/fleet16.log 2>&1
+/usr/local/lib/stevedore/stevedore-fleetrun.sh --skip-ec2 -c ~/fleet-skipec2.conf >/tmp/fleet16.log 2>&1
 rc=$?
 check "T18 rc=0 (skip is not a failure)" test "$rc" -eq 0
 grep -q "skip-ec2: \[vmrecv2\] 1 job(s) dropped" /tmp/fleet16.log && ok "T18 drop announced" || { bad "T18 announce"; grep -a "skip-ec2" /tmp/fleet16.log; }
 grep -q "starting run listener on \[vmrecv2\]" /tmp/fleet16.log && bad "T18 dropped host was provisioned" || ok "T18 dropped host left untouched"
 grep -q "0 failed" /tmp/fleet16.log && ok "T18 surviving jobs clean" || { bad "T18 failures"; tail -n 20 /tmp/fleet16.log; }
 grep -qF '"dst":"vmrecv2","state":"cadence","rc":"0","why":"skipped by --skip-ec2"' "$RJ" && ok "T18 skip in jsonl" || { bad "T18 jsonl"; tail -n 3 "$RJ"; }
-/etc/zfsrecvd/report.sh 2>/dev/null | grep -q "1 ec2 skipped" && ok "T18 report tallies separately" || { bad "T18 tally"; /etc/zfsrecvd/report.sh 2>&1 | head -n 8; }
+/usr/local/lib/stevedore/stevedore-report.sh 2>/dev/null | grep -q "1 ec2 skipped" && ok "T18 report tallies separately" || { bad "T18 tally"; /usr/local/lib/stevedore/stevedore-report.sh 2>&1 | head -n 8; }
 
 # contradictory flags refuse loudly
-/etc/zfsrecvd/fleetrun.sh --skip-ec2 --force-ec2 -c ~/fleet-skipec2.conf >/tmp/fleet17.log 2>&1
+/usr/local/lib/stevedore/stevedore-fleetrun.sh --skip-ec2 --force-ec2 -c ~/fleet-skipec2.conf >/tmp/fleet17.log 2>&1
 rc=$?
 check "T18 --skip-ec2 --force-ec2 is a usage error" test "$rc" -eq 64
 
 # --check names the dropped rows
-/etc/zfsrecvd/fleetrun.sh --skip-ec2 --check -c ~/fleet-skipec2.conf >/tmp/fleet18.log 2>&1
+/usr/local/lib/stevedore/stevedore-fleetrun.sh --skip-ec2 --check -c ~/fleet-skipec2.conf >/tmp/fleet18.log 2>&1
 rc=$?
 check "T18 check rc=0" test "$rc" -eq 0
 grep -q "SKIPPED (--skip-ec2)" /tmp/fleet18.log && ok "T18 check lists the drop" || { bad "T18 check"; grep -a "job:" /tmp/fleet18.log; }
