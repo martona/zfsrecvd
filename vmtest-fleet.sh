@@ -429,6 +429,57 @@ check "T19 timer gone"  bash -c "! systemctl is-enabled --quiet stevedore-fleet.
 check "T19 units removed" bash -c "! test -e /etc/systemd/system/stevedore-fleet.service && ! test -e /etc/systemd/system/stevedore-fleet.timer"
 sudo rm /etc/stevedore/fleet.conf
 
+echo "=== T20: destroy flag: off by default, re-confirmed, bottom-up ==="
+# Canaries: an aged orphan subtree (both stamped -> dies whole), an aged
+# orphan with a non-eligible child (blocks -r), a dead-CN orphan (stale
+# evidence: newest last-recv predates the stamp -> total-silence rule),
+# and an aged receiver-only snapshot under a live dataset. The CN's
+# fresh last-recv comes from the suite's own runs.
+sudo zfs create -p "ztest/recv/$CN/doomed/child"
+sudo zfs snapshot "ztest/recv/$CN/doomed@junk"
+sudo zfs set stevedore:orphan-since=2026-01-01T00:00:00Z "ztest/recv/$CN/doomed"
+sudo zfs set stevedore:orphan-since=2026-01-01T00:00:00Z "ztest/recv/$CN/doomed/child"
+sudo zfs create -p "ztest/recv/$CN/blockd/keepchild"
+sudo zfs snapshot "ztest/recv/$CN/blockd/keepchild@live"
+sudo zfs set stevedore:orphan-since=2026-01-01T00:00:00Z "ztest/recv/$CN/blockd"
+sudo zfs create -p ztest/recv/deadclient/lost
+sudo zfs set stevedore:last-recv=2025-06-01T00:00:00Z ztest/recv/deadclient/lost
+sudo zfs set stevedore:orphan-since=2026-01-01T00:00:00Z ztest/recv/deadclient/lost
+sudo zfs snapshot "$DEST/b@agedforeign"
+sudo zfs set stevedore:unknown-since=2026-01-01T00:00:00Z "$DEST/b@agedforeign"
+gridsnap=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST" | grep '@stevedore-' | tail -n 1)
+sudo zfs set stevedore:unknown-since=2026-01-01T00:00:00Z "$gridsnap"
+GCBIN=/usr/local/lib/stevedore/stevedore-gc.sh
+GCCONF=/etc/stevedore/stevedore.conf
+# no flag: knobs at zero still destroy NOTHING
+out=$(sudo env STEVEDORE_GC_WARN_DAYS=0 STEVEDORE_GC_GRACE_DAYS=0 STEVEDORE_CONF=$GCCONF $GCBIN 2>&1)
+grep -q "doomed: RECLAIM-ELIGIBLE.*destroy flag off" <<<"$out" && ok "T20 flag-off names eligibility" || { bad "T20 flag-off"; grep doomed <<<"$out"; }
+check "T20 flag off destroys nothing" sudo zfs list -H "ztest/recv/$CN/doomed" "ztest/recv/$CN/blockd" ztest/recv/deadclient/lost "$DEST/b@agedforeign"
+# --destroy: eligible + re-confirmed items die, everything else survives
+out=$(sudo env STEVEDORE_GC_WARN_DAYS=0 STEVEDORE_GC_GRACE_DAYS=0 STEVEDORE_CONF=$GCCONF $GCBIN --destroy 2>&1)
+check "T20 doomed subtree destroyed"  bash -c "! sudo zfs list -H ztest/recv/$CN/doomed 2>/dev/null"
+grep -q "doomed: DESTROYED (-r)" <<<"$out" && ok "T20 destroy announced" || { bad "T20 announce"; grep -i doomed <<<"$out"; }
+grep -q "blockd: eligible but NOT destroyed -- descendant" <<<"$out" && ok "T20 non-eligible child blocks -r" || { bad "T20 blocker"; grep -i blockd <<<"$out"; }
+check "T20 blocked subtree survives"  sudo zfs list -H "ztest/recv/$CN/blockd/keepchild@live"
+check "T20 dead-CN orphan survives"   sudo zfs list -H ztest/recv/deadclient/lost
+grep -q "lost: RECLAIM-ELIGIBLE.*not re-confirmed" <<<"$out" && ok "T20 stale evidence refused" || { bad "T20 stale"; grep -i lost <<<"$out"; }
+check "T20 aged foreign snapshot destroyed" bash -c "! sudo zfs list -H '$DEST/b@agedforeign' 2>/dev/null"
+grep -q "agedforeign: DESTROYED" <<<"$out" && ok "T20 snapshot destroy announced" || { bad "T20 snap announce"; grep -i agedforeign <<<"$out"; }
+check "T20 grid-prefix snap survives (belt)" sudo zfs list -H "$gridsnap"
+grep -q "grid-prefixed; the grid owns it" <<<"$out" && ok "T20 grid belt announced" || { bad "T20 grid belt"; grep -i grid <<<"$out"; }
+# fleet.conf gc-destroy on: the flag rides a whole run end to end
+sudo zfs create "ztest/recv/$CN/doomed2"
+sudo zfs snapshot "ztest/recv/$CN/doomed2@junk"
+sudo zfs set stevedore:orphan-since=2026-01-01T00:00:00Z "ztest/recv/$CN/doomed2"
+sed '/^port/a gc-destroy   on' ~/fleet-test.conf > ~/fleet-gcd.conf
+STEVEDORE_GC_WARN_DAYS=0 STEVEDORE_GC_GRACE_DAYS=0 /usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-gcd.conf >/tmp/fleet19.log 2>&1
+rc=$?
+check "T20 gc-destroy run rc=0" test "$rc" -eq 0
+grep -q "gc: destroy flag is ON" /tmp/fleet19.log && ok "T20 run announces the armed flag" || { bad "T20 arm announce"; grep -a "gc:" /tmp/fleet19.log | head -3; }
+check "T20 doomed2 reclaimed by the run" bash -c "! sudo zfs list -H ztest/recv/$CN/doomed2 2>/dev/null"
+grep -q "doomed2: DESTROYED" /tmp/fleet19.log && ok "T20 destroy in run output" || { bad "T20 run output"; grep -a DESTROY /tmp/fleet19.log | head -3; }
+grep -qF 'DESTROYED' "$RJ" && ok "T20 destroys ride the jsonl gc harvest" || { bad "T20 jsonl"; tail -n 1 "$RJ"; }
+
 echo
 echo "=== RESULT: $PASS passed, $FAIL failed ==="
 if [ "$FAIL" -gt 0 ]; then

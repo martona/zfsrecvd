@@ -357,7 +357,12 @@ Knobs (env, on the steve run command line):
   STEVEDORE_SHOW_PRUNES=1      name every snapshot destroyed by the run
   STEVEDORE_GC_WARN_DAYS= / STEVEDORE_GC_GRACE_DAYS=
                               GC thresholds, forwarded to receivers
-                              (warn-only build: 0 is safe, nothing destroys)
+                              (0 is safe while gc-destroy is off)
+fleet.conf [options] gc-destroy on
+                              arms GC destruction (default off = warn
+                              only): grace-expired items whose absence
+                              live sessions kept re-confirming are
+                              reclaimed at the post-run GC pass
 
 Internals live in $STEVE_LIB (debug invocation = full path).
 Ledger: $STEVE_VAR/runs.jsonl.

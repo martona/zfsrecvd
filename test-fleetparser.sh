@@ -130,5 +130,15 @@ b recv=t/r cadence=often' 2 "bad cadence"
 expect_fatal badcadence2 '[hosts]
 b recv=t/r cadence=24' 2 "bad cadence"
 
+expect_fatal badgcdestroy '[options]
+gc-destroy yes' 2 "gc-destroy"
+
+# gc-destroy: default off, accepts on
+printf '[options]\ngc-destroy on\n[hosts]\nb recv=t/r\n[jobs]\na t b\n' > "$FX/gcd.conf"
+o=$(bash -c "source '$FP'; fleet_parse '$FX/gcd.conf'; echo \"gcd=\$fleet_opt_gc_destroy\"" 2>&1)
+grep -q "gcd=on" <<<"$o" && ok "gc-destroy on parses" || bad "gc-destroy on: $o"
+o=$(bash -c "source '$FP'; fleet_parse '$FX/good.conf'; echo \"gcd=\$fleet_opt_gc_destroy\"" 2>&1)
+grep -q "gcd=off" <<<"$o" && ok "gc-destroy defaults off" || bad "gc-destroy default: $o"
+
 echo "=== RESULT: $PASS passed, $FAIL failed ==="
 [[ $FAIL -eq 0 ]]

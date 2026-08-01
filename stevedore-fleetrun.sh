@@ -781,6 +781,13 @@ fi
 if [[ "${STEVEDORE_GC_GRACE_DAYS:-}" =~ ^[0-9]+$ ]]; then
     gcenv+=" STEVEDORE_GC_GRACE_DAYS=${STEVEDORE_GC_GRACE_DAYS}"
 fi
+# the destroy flag (§22): armed ONLY by fleet.conf [options] gc-destroy
+# on -- a deliberate, persistent flip, not a per-run switch
+gcdflag=""
+if [[ "$fleet_opt_gc_destroy" == "on" ]]; then
+    gcdflag=" --destroy"
+    echo "gc: destroy flag is ON (fleet.conf gc-destroy); grace-expired, re-confirmed items will be reclaimed" >&2
+fi
 gc_json=""
 for h in "${fleet_receivers[@]}"; do
     if [[ -n "${prov_failed[$h]:-}" ]]; then
@@ -791,7 +798,7 @@ for h in "${fleet_receivers[@]}"; do
     # re-echoed verbatim -- the console keeps every line in every mode
     gout=""
     if ! gout=$(fleet_ssh "$(fleet_ssh_dest "$h")" \
-        "sudo -n env STEVEDORE_CONF=$RUN_REMOTE_BASE/$h/run.conf$gcenv $STEVE_LIB/stevedore-gc.sh" \
+        "sudo -n env STEVEDORE_CONF=$RUN_REMOTE_BASE/$h/run.conf$gcenv $STEVE_LIB/stevedore-gc.sh$gcdflag" \
         </dev/null); then
         echo "WARNING: gc pass failed on [$h]" >&2
     fi

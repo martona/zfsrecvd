@@ -9,7 +9,8 @@
 # typo must die at parse time, not at provisioning time.
 #
 # Globals:
-#   fleet_opt_user fleet_opt_port fleet_opt_workers fleet_opt_transport   [options] w/ defaults
+#   fleet_opt_user fleet_opt_port fleet_opt_workers fleet_opt_transport
+#   fleet_opt_gc_destroy                        [options] w/ defaults
 #   fleet_ret_source fleet_ret_destination     raw bucket strings, reserved for D
 #   fleet_host_ssh[] _data[] _recv[] _ec2[] _bind[] _cadence[]   assoc by identity, sparse
 #   fleet_job_src[] fleet_job_tree[] fleet_job_dest[]   parallel arrays, one row per job
@@ -27,6 +28,7 @@ fleet_opt_user=""
 fleet_opt_port=""
 fleet_opt_workers=""
 fleet_opt_transport=""
+fleet_opt_gc_destroy=""
 fleet_ret_source=""
 fleet_ret_destination=""
 declare -A fleet_host_ssh fleet_host_data fleet_host_recv fleet_host_ec2 fleet_host_bind fleet_host_cadence
@@ -56,6 +58,9 @@ _fleet_opt_line() {
         transport) [[ "$2" == "socat" || "$2" == "haproxy" ]] \
                      || _fleet_fatal "transport must be 'socat' or 'haproxy'"
                  fleet_opt_transport="$2" ;;
+        gc-destroy) [[ "$2" == "on" || "$2" == "off" ]] \
+                     || _fleet_fatal "gc-destroy must be 'on' or 'off'"
+                 fleet_opt_gc_destroy="$2" ;;
         *)       _fleet_fatal "unknown option '$1'" ;;
     esac
 }
@@ -167,6 +172,7 @@ fleet_parse() {
     [[ -z "$fleet_opt_port" ]] && fleet_opt_port=5299
     [[ -z "$fleet_opt_workers" ]] && fleet_opt_workers=8
     [[ -z "$fleet_opt_transport" ]] && fleet_opt_transport="socat"
+    [[ -z "$fleet_opt_gc_destroy" ]] && fleet_opt_gc_destroy="off"
     (( ${#fleet_job_src[@]} > 0 )) || _fleet_fatal "no [jobs] defined"
     local i d
     for (( i = 0; i < ${#fleet_job_src[@]}; i++ )); do

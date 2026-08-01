@@ -1,22 +1,37 @@
 #!/usr/bin/env bash
-# Orphan GC, WARN-ONLY build (PROTOCOL.md §22), manifest era: since 2.1
-# the SERVER owns every clock (stevedore-recv.sh stamps orphan-since on
-# manifest-absent datasets and unknown-since on receiver-only snapshots
-# at ENDTREE, and clears both on reappearance). This script is READ-ONLY
-# -- it renders the clocks. Runs ON a receiver against its recv_root;
+# Orphan GC (PROTOCOL.md §22), manifest era: since 2.1 the SERVER owns
+# every clock (stevedore-recv.sh stamps orphan-since on manifest-absent
+# datasets and unknown-since on receiver-only snapshots at ENDTREE, and
+# clears both on reappearance). This script renders the clocks -- and,
+# ONLY under --destroy (fleet.conf [options] gc-destroy on), reclaims
+# what they have proven. Runs ON a receiver against its recv_root;
 # fleetrun invokes it after each run.
 #
 # Timeline per clocked item (owner 2026-07-31: "60+30, not 90+30"):
 #   stamp+0 ......... GC-TRACK inventory line (jsonl; report --gc-debug)
 #   stamp+WARN_DAYS . console warning with the countdown
-#   stamp+GRACE_DAYS  RECLAIM-ELIGIBLE -- still warn-only, NO destroy
-#                     path exists in this build ("reclamation never the
-#                     first mention").
+#   stamp+GRACE_DAYS  RECLAIM-ELIGIBLE; destroyed only under --destroy
+#                     AND only when re-confirmed (below)
+#
+# The destroy gate, per §22 ("a stamp alone never suffices" -- this is
+# the manifest-era translation of re-verify-against-the-latest-report):
+#   datasets:  orphan-since expired AND the CN's newest last-recv
+#              postdates the stamp by >= WARN_DAYS -- live sessions
+#              kept confirming the absence for that long (a session
+#              would have CLEARED the stamp on reappearance). Destroyed
+#              BOTTOM-UP, depth-descending, `zfs destroy -r` each, and
+#              only when EVERY live descendant is itself eligible:
+#              stamps age per-dataset, and -r must never take a
+#              non-eligible child along.
+#   snapshots: unknown-since expired AND the PARENT dataset's last-recv
+#              postdates the stamp by >= WARN_DAYS; grid-prefix names
+#              are the retention grid's business, never GC's.
+# Total-silence safety is intrinsic on both paths: a dead or paused
+# sender refreshes no last-recv, so the margin never accrues and
+# nothing dies on stale evidence.
+#
 # Also lists never-stamped LEAF datasets (the "old crap"; containers
 # whose descendants are stamped are scaffolding and stay quiet).
-# A dead or paused sender sends no manifests, so nothing new is ever
-# stamped during total silence -- and the future destroy path must
-# re-verify against the LATEST manifest before acting.
 #
 # Exit 0 always.
 
@@ -24,13 +39,18 @@ set -euo pipefail
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/stevedore-cfgparser.sh"
 
 # Env-overridable so the machinery can be WATCHED without waiting months
-# -- safe to turn all the way down precisely because this build cannot
-# destroy anything:
+# -- safe to turn all the way down WITHOUT --destroy, where nothing can
+# be destroyed:
 #   sudo env STEVEDORE_GC_WARN_DAYS=0 STEVEDORE_GC_GRACE_DAYS=0 \
 #       STEVEDORE_CONF=/run/stevedore/<id>/run.conf \
 #       /usr/local/lib/stevedore/stevedore-gc.sh
 WARN_DAYS="${STEVEDORE_GC_WARN_DAYS:-60}"    # stamp -> console warnings
 GRACE_DAYS="${STEVEDORE_GC_GRACE_DAYS:-90}"  # stamp -> reclaim-eligible
+
+destroy=""
+if [[ "${1:-}" == "--destroy" ]]; then
+    destroy=1
+fi
 
 now=$(date -u +%s)
 say() { echo "GC:   $*"; }
@@ -56,6 +76,8 @@ while IFS= read -r cnroot; do
     declare -A lr=() osince=()
     dss=()
     declare -A _seen=()
+    declare -A delig=() blocked=() sewhy=()
+    selig=()
     while IFS=$'\t' read -r ds prop val src; do
         [[ "$ds" != "$cnroot" ]] || continue
         if [[ -z "${_seen[$ds]:-}" ]]; then
@@ -112,7 +134,18 @@ while IFS= read -r cnroot; do
         n_cand=$(( n_cand + 1 ))
         if (( oage >= GRACE_DAYS )); then
             n_warn=$(( n_warn + 1 ))
-            say "$ds: RECLAIM-ELIGIBLE -- absent at source since ${osince[$ds]}; grace expired (warn-only build, NOT destroyed)"
+            # Re-confirmation gate (§22: a stamp alone never suffices):
+            # the CN's newest last-recv must postdate the stamp by
+            # WARN_DAYS -- live sessions kept confirming the absence
+            # (a reappearance would have CLEARED the stamp). Stale
+            # evidence (paused/dead sender) destroys nothing, ever.
+            if [[ -z "$destroy" ]]; then
+                say "$ds: RECLAIM-ELIGIBLE -- absent at source since ${osince[$ds]}; grace expired (destroy flag off; NOT destroyed)"
+            elif (( newest - oe >= WARN_DAYS * 86400 )); then
+                delig[$ds]="${osince[$ds]}"   # outcome printed by the destroy pass
+            else
+                say "$ds: RECLAIM-ELIGIBLE -- absent at source since ${osince[$ds]}; grace expired; NOT destroyed (absence not re-confirmed by sessions since the stamp)"
+            fi
             track "$ds: orphan-since ${osince[$ds]}; grace expired"
         elif (( oage >= WARN_DAYS )); then
             n_warn=$(( n_warn + 1 ))
@@ -132,7 +165,30 @@ while IFS= read -r cnroot; do
         uleft=$(( GRACE_DAYS - uage ))
         if (( uage >= GRACE_DAYS )); then
             n_warn=$(( n_warn + 1 ))
-            say "$sn: RECLAIM-ELIGIBLE -- receiver-only since $val; grace expired (warn-only build, NOT destroyed)"
+            # parent's last-recv carries the re-confirmation: the
+            # dataset kept receiving (and kept not re-mentioning this
+            # guid) for WARN_DAYS past the stamp
+            pds="${sn%@*}"
+            pe="${lr[$pds]:-0}"
+            gridsnap=""
+            for pfx in "${prune_prefixes[@]}"; do
+                if [[ "${sn##*@}" == "$pfx"* ]]; then
+                    gridsnap=1
+                    break
+                fi
+            done
+            if [[ -z "$destroy" ]]; then
+                say "$sn: RECLAIM-ELIGIBLE -- receiver-only since $val; grace expired (destroy flag off; NOT destroyed)"
+            elif [[ -n "$gridsnap" ]]; then
+                # belt: stamps never land on grid snaps, but the grid's
+                # snapshots are the retention grid's business, never GC's
+                say "$sn: RECLAIM-ELIGIBLE but grid-prefixed; the grid owns it, NOT destroyed (stray stamp?)"
+            elif (( pe - ue >= WARN_DAYS * 86400 )); then
+                selig+=( "$sn" )
+                sewhy[$sn]="$val"
+            else
+                say "$sn: RECLAIM-ELIGIBLE -- receiver-only since $val; grace expired; NOT destroyed (dataset not re-confirmed by sessions since the stamp)"
+            fi
             track "$sn: unknown-since $val; grace expired"
         elif (( uage >= WARN_DAYS )); then
             n_warn=$(( n_warn + 1 ))
@@ -142,6 +198,54 @@ while IFS= read -r cnroot; do
             track "$sn: unknown-since $val; eligible in ${uleft}d"
         fi
     done < <(zfs get -H -r -s local,received -t snapshot -o name,value stevedore:unknown-since "$cnroot" 2>/dev/null || true)
+
+    # ---- destroy pass (--destroy only) ---------------------------------
+    # Snapshots first (independent, cheap), then datasets BOTTOM-UP:
+    # depth-descending, `zfs destroy -r` each, skip already-gone. A
+    # dataset dies only when every live descendant is itself eligible --
+    # stamps age per-dataset, and -r must never take a non-eligible
+    # child along (§22, owner-specified).
+    n_destroyed=0
+    if [[ -n "$destroy" ]]; then
+        for sn in "${selig[@]:-}"; do
+            [[ -n "$sn" ]] || continue
+            if zfs destroy "$sn" 2>/dev/null; then
+                say "$sn: DESTROYED -- receiver-only since ${sewhy[$sn]}; grace expired, absence re-confirmed"
+                n_destroyed=$(( n_destroyed + 1 ))
+            else
+                say "$sn: WARNING -- destroy failed (hold or clone?); still eligible"
+            fi
+        done
+        for cand in "${!delig[@]}"; do
+            for other in "${dss[@]}"; do
+                if [[ "$other" == "$cand"/* && -z "${delig[$other]:-}" ]]; then
+                    blocked[$cand]=1
+                    say "$cand: eligible but NOT destroyed -- descendant $other is not eligible (-r must never take it along)"
+                    break
+                fi
+            done
+        done
+        while read -r _ cand; do
+            [[ -n "${cand:-}" && -z "${blocked[$cand]:-}" ]] || continue
+            # a deeper eligible sibling-tree destroy cannot have taken
+            # us, but the check is one cheap list either way
+            zfs list -H -o name "$cand" >/dev/null 2>&1 || continue
+            if zfs destroy -r "$cand" 2>/dev/null; then
+                say "$cand: DESTROYED (-r) -- orphan-since ${delig[$cand]}; grace expired, absence re-confirmed"
+                n_destroyed=$(( n_destroyed + 1 ))
+            else
+                say "$cand: WARNING -- destroy failed (hold, clone, or busy?); still eligible"
+            fi
+        done < <(
+            for cand in "${!delig[@]}"; do
+                d="${cand//[^\/]/}"
+                printf '%d %s\n' "${#d}" "$cand"
+            done | sort -rn -k1,1
+        )
+        if (( n_destroyed > 0 )); then
+            say "$cnroot: reclaimed $n_destroyed item(s) this pass"
+        fi
+    fi
 
     # client summary: per-CN line only when there is something WARNED
     # about (owner: all-zero lines "elevate to noise", and un-warned
@@ -154,7 +258,7 @@ while IFS= read -r cnroot; do
         quiet_cns=$(( quiet_cns + 1 ))
         quiet_ds=$(( quiet_ds + ${#dss[@]} ))
     fi
-    unset lr osince _seen
+    unset lr osince _seen delig blocked sewhy
 done < <(zfs list -H -d 1 -t filesystem -o name "$recv_root" 2>/dev/null || true)
 
 if (( quiet_cns > 0 )); then
