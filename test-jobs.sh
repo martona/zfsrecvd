@@ -64,6 +64,18 @@ drive "jl sq"
 [[ $(njobs) == 4 ]] && ok "toggle added a job" || bad "toggle count: $(njobs)"
 grep -Eq "^srcB +tank/b +recv2$" "$CONF" && ok "srcB/tank/b -> recv2 row emitted" || bad "row missing"
 cmp -s "$CONF.bak" "$FX/pre" && ok ".bak is the previous version" || bad ".bak wrong"
+# mktemp is 0600; the atomic replace must mirror the original's mode
+# (a root edit once left fleet.conf unreadable to the operator). Some
+# filesystems (NTFS under Git Bash) cannot express 640 at all -- only
+# assert when the pre-save chmod actually stuck.
+chmod 640 "$CONF" 2>/dev/null
+if [[ "$(stat -c %a "$CONF")" == 640 ]]; then
+    drive "sq"
+    mode=$(stat -c %a "$CONF")
+    [[ "$mode" == 640 ]] && ok "save preserves file mode (640)" || bad "mode after save: $mode"
+else
+    ok "mode preservation untestable here (fs cannot express 640); VM asserts it"
+fi
 
 # --- toggle without saving: q q discards, file untouched --------------------
 mkconf

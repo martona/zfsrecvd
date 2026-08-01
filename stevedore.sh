@@ -73,12 +73,16 @@ do_install() {
     done
     ln -sfn "$STEVE_LIB/stevedore.sh" "$STEVE_BIN"
 
+    u=$(orch_user)
     mkdir -p "$STEVE_ETC"
     if [[ ! -f "$STEVE_ETC/stevedore.conf" && -f "$STEVE_HERE/stevedore.conf" ]]; then
         cp "$STEVE_HERE/stevedore.conf" "$STEVE_ETC/stevedore.conf"
     fi
-
-    u=$(orch_user)
+    # the config belongs to the operator, same doctrine as the ledger:
+    # on a one-operator estate the orchestrator's identity IS the
+    # operator, and editing fleet.conf (steve jobs, or a plain editor)
+    # must not require sudo
+    chown "$u" "$STEVE_ETC" "$STEVE_ETC"/*.conf 2>/dev/null || true
     mkdir -p "$STEVE_VAR"
     chown "$u" "$STEVE_VAR"
     if [[ ! -s "$STEVE_VAR/runs.jsonl" ]]; then

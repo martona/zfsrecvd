@@ -214,6 +214,13 @@ jobs_emit_file() {
 jobs_save() {
     local tmp
     tmp=$(mktemp "${CONF}.new.XXXXXX")
+    # mktemp makes the temp 0600 owned by the INVOKER, and mv installs
+    # that identity wholesale -- a sudo edit once flipped fleet.conf to
+    # root:0600 and the operator's next run couldn't read it. Mirror the
+    # original's mode and owner; chown needs root and is best-effort
+    # (an unprivileged edit already has the right owner).
+    chmod --reference="$CONF" "$tmp" 2>/dev/null || true
+    chown --reference="$CONF" "$tmp" 2>/dev/null || true
     jobs_emit_file > "$tmp"
     local verr
     if ! verr=$(bash -c "source '$here/stevedore-fleetparser.sh'; fleet_parse '$tmp'" 2>&1); then
