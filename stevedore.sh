@@ -31,7 +31,7 @@ STEVE_HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 source "$STEVE_HERE/stevedore-paths.sh"
 
 usage() {
-    echo "usage: steve install | run [args] | report [args] | check | timer [on [cal]|off|status] | unlock <replica> | uninstall [--purge] | help" >&2
+    echo "usage: steve install | run [args] | jobs [-c conf] | report [args] | check | timer [on [cal]|off|status] | unlock <replica> | uninstall [--purge] | help" >&2
     exit 64
 }
 
@@ -333,6 +333,9 @@ steve -- fleet ZFS replication (stevedore)
   steve run --check           plan preview: jobs, skips, nothing provisioned
   steve run --force-ec2       override every cadence window for this run
   steve run --skip-ec2        drop all ec2= destinations (instance maintenance)
+  steve jobs                  full-screen editor for the fleet.conf job
+                              matrix: (source, tree) rows x receiver
+                              columns, space toggles a job
   steve report [-n N]         last run + N-run trend + gc findings
   steve report --gc-debug     + the full GC track inventory (every clocked
                               dataset/snapshot with its eligible-in countdown)
@@ -363,6 +366,7 @@ case "$cmd" in
     install)   do_install ;;
     uninstall) do_uninstall "$@" ;;
     run)       exec "$STEVE_HERE/stevedore-fleetrun.sh" "$@" ;;
+    jobs)      exec "$STEVE_HERE/stevedore-jobs.sh" "$@" ;;
     report)    exec "$STEVE_HERE/stevedore-report.sh" "$@" ;;
     unlock)    exec "$STEVE_HERE/stevedore-unlock-replica.sh" "$@" ;;
     timer)     do_timer "$@" ;;

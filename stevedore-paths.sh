@@ -33,6 +33,7 @@ STEVE_FILES=(
     stevedore-listen.sh
     stevedore-recv.sh
     stevedore-gc.sh
+    stevedore-jobs.sh
     stevedore-orchestrate.sh
     stevedore-fleetrun.sh
     stevedore-report.sh
