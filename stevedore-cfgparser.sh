@@ -17,7 +17,7 @@
 
 source "$(dirname "${BASH_SOURCE[0]}")/stevedore-paths.sh"
 
-CFG="${ZFSRECVD_CONF:-$STEVE_ETC/stevedore.conf}"
+CFG="${STEVEDORE_CONF:-$STEVE_ETC/stevedore.conf}"
 
 recv_root="" tcp_port="" tcp_addr="" keep_count="" cert_dir="" allowed_hosts=()
 sends=() prune_prefixes=() orchtargets=() orchjobs=() orchec2up=() orchworkers=""
@@ -76,7 +76,7 @@ if ! [[ "$keep_count" =~ ^[0-9]+$ ]]; then keep_count=6; fi
 # without touching any statically-placed ones.
 if [[ -z "$cert_dir" ]]; then cert_dir="$STEVE_ETC"; fi
 if [[ -z "$transport" ]]; then transport="socat"; fi
-if [[ ${#prune_prefixes[@]} -eq 0 ]]; then prune_prefixes=( "zfsrecvd-" ); fi
+if [[ ${#prune_prefixes[@]} -eq 0 ]]; then prune_prefixes=( "stevedore-" ); fi
 
 # force pv to display output. inner scripts will run through run_indented.sh so they
 # won't see a terminal, but will inherit this variable.

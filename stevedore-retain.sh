@@ -7,7 +7,7 @@
 #
 # Semantics (owner-agreed 2026-07-29):
 # - Buckets are UTC calendar periods, keyed straight off the timestamp
-#   embedded in the snapshot name (zfsrecvd-YYYY-MM-DD-HHMMZ): hour, day,
+#   embedded in the snapshot name (stevedore-YYYY-MM-DD-HHMMZ): hour, day,
 #   ISO week (%G-W%V), month. Names ARE the clock; creation dates are
 #   never consulted, so decisions are deterministic and testable from a
 #   name list alone.

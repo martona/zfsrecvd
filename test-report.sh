@@ -10,11 +10,11 @@ ok()  { echo "PASS: $*"; PASS=$((PASS+1)); }
 bad() { echo "FAIL: $*"; FAIL=$((FAIL+1)); }
 
 cat > "$FX/runs.jsonl" <<'EOF'
-{"ts":"2026-07-29T01:00:00Z","snap":"zfsrecvd-2026-07-29-0100Z","src":"jup","tree":"tank/a","dst":"berg","state":"done","rc":"0","why":"","failed_ds":"","secs":10}
-{"ts":"2026-07-29T01:00:00Z","snap":"zfsrecvd-2026-07-29-0100Z","src":"jup","tree":"tank/a","dst":"cp4","state":"done","rc":"0","why":"","failed_ds":"","secs":12}
+{"ts":"2026-07-29T01:00:00Z","snap":"stevedore-2026-07-29-0100Z","src":"jup","tree":"tank/a","dst":"berg","state":"done","rc":"0","why":"","failed_ds":"","secs":10}
+{"ts":"2026-07-29T01:00:00Z","snap":"stevedore-2026-07-29-0100Z","src":"jup","tree":"tank/a","dst":"cp4","state":"done","rc":"0","why":"","failed_ds":"","secs":12}
 {"ts":"2026-07-29T01:01:00Z","kind":"run","run":"run-A","rc":0,"recv":[{"id":"berg","before":1000,"after":2024,"avail":5000000,"pruned":100},{"id":"cp4","before":500,"after":800,"avail":900000,"pruned":0}],"src":[{"id":"jup","tree":"tank/a","used":123456,"avail":777777}]}
-{"ts":"2026-07-30T01:00:00Z","snap":"zfsrecvd-2026-07-30-0100Z","src":"jup","tree":"tank/a","dst":"berg","state":"done","rc":"0","why":"","failed_ds":"","secs":9}
-{"ts":"2026-07-30T01:00:00Z","snap":"zfsrecvd-2026-07-30-0100Z","src":"jup","tree":"tank/a","dst":"cp4","state":"done","rc":"2","why":"some datasets failed","failed_ds":"tank/a/vol tank/a/deep","secs":44}
+{"ts":"2026-07-30T01:00:00Z","snap":"stevedore-2026-07-30-0100Z","src":"jup","tree":"tank/a","dst":"berg","state":"done","rc":"0","why":"","failed_ds":"","secs":9}
+{"ts":"2026-07-30T01:00:00Z","snap":"stevedore-2026-07-30-0100Z","src":"jup","tree":"tank/a","dst":"cp4","state":"done","rc":"2","why":"some datasets failed","failed_ds":"tank/a/vol tank/a/deep","secs":44}
 {"ts":"2026-07-30T01:00:40Z","snap":"","src":"jup","tree":"tank/c","dst":"ec2","state":"cadence","rc":"0","why":"last ok 2026-07-29T20:00:00Z (cadence 24h)","failed_ds":"","secs":0}
 {"ts":"2026-07-30T01:00:41Z","snap":"","src":"vbox","tree":"tank/d","dst":"ec2","state":"cadence","rc":"0","why":"source unreachable; cadence window not consulted","failed_ds":"","secs":0}
 {"ts":"2026-07-30T01:00:42Z","snap":"","src":"jup","tree":"tank/e","dst":"ec2","state":"cadence","rc":"0","why":"skipped by --skip-ec2","failed_ds":"","secs":0}

@@ -35,7 +35,7 @@ if [[ ! -b "$dev" ]]; then
     exit 1
 fi
 
-mnt=$(mktemp -d /run/zfsrecvd-ks.XXXXXX)
+mnt=$(mktemp -d /run/stevedore-ks.XXXXXX)
 luks=""
 cleanup() {
     umount "$mnt" 2>/dev/null || true
@@ -47,7 +47,7 @@ cleanup() {
 trap cleanup EXIT
 
 if blkid -o value -s TYPE "$dev" 2>/dev/null | grep -q crypto_LUKS; then
-    luks="zfsrecvd-ks-$$"
+    luks="stevedore-ks-$$"
     echo "keystore is LUKS; passphrase:" >&2
     cryptsetup open --readonly "$dev" "$luks"
     mount -o ro "/dev/mapper/$luks" "$mnt"

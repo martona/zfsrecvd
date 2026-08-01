@@ -20,8 +20,8 @@ DEST="ztest/recv/$CN/ztest/src"
 DEST2="ztest/recv2/$CN/ztest/src"
 
 echo "=== setup ==="
-sudo systemctl stop "zfsrecvd-run-*" "zfsrecvd-ha-*" zfsrecvd-test 2>/dev/null
-sudo systemctl reset-failed "zfsrecvd-run-*" "zfsrecvd-ha-*" zfsrecvd-test 2>/dev/null
+sudo systemctl stop "stevedore-run-*" "stevedore-ha-*" stevedore-test 2>/dev/null
+sudo systemctl reset-failed "stevedore-run-*" "stevedore-ha-*" stevedore-test 2>/dev/null
 rm -rf /tmp/stevedore-fleet.* 2>/dev/null
 sleep 0.5
 sudo zpool destroy ztest 2>/dev/null
@@ -60,7 +60,7 @@ openssl req -newkey rsa:2048 -nodes -keyout client.key -out client.csr -subj "/C
 openssl x509 -req -in client.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 2 -out client.pem 2>/dev/null
 chmod 600 *.key
 '
-sudo systemd-run --unit=zfsrecvd-test /usr/local/lib/stevedore/stevedore-listen.sh >/dev/null 2>&1
+sudo systemd-run --unit=stevedore-test /usr/local/lib/stevedore/stevedore-listen.sh >/dev/null 2>&1
 sleep 1
 check "legacy listener up on 5299" bash -c 'ss -tln | grep -q ":5299 "'
 static_sum=$(sudo sha256sum /etc/stevedore/client.pem /etc/stevedore/server.pem /etc/stevedore/ca.pem | sha256sum)
@@ -109,18 +109,18 @@ rc=$?
 check "T3 rc=0" test "$rc" -eq 0
 check "T3 scripts shipped with run" bash -c "[ \"\$(stat -c %i /usr/local/lib/stevedore/stevedore-sendtree.sh)\" != \"$ino_before\" ]"
 check "T3 data arrived"        sudo zfs list -H "$DEST"
-check "T3 deep child arrived"  bash -c "sudo zfs list -H -t snapshot -d 1 -o name $DEST/a/deep | grep -q zfsrecvd-"
-check "T3 zvol arrived"        bash -c "sudo zfs list -H -t snapshot -d 1 -o name $DEST/vol | grep -q zfsrecvd-"
-check "T3 stamp present"       bash -c "[ \"\$(sudo zfs get -H -o value zfsrecvd:last-recv $DEST)\" != '-' ]"
+check "T3 deep child arrived"  bash -c "sudo zfs list -H -t snapshot -d 1 -o name $DEST/a/deep | grep -q stevedore-"
+check "T3 zvol arrived"        bash -c "sudo zfs list -H -t snapshot -d 1 -o name $DEST/vol | grep -q stevedore-"
+check "T3 stamp present"       bash -c "[ \"\$(sudo zfs get -H -o value stevedore:last-recv $DEST)\" != '-' ]"
 check "T3 second dest arrived" sudo zfs list -H "$DEST2"
-check "T3 second dest stamp"   bash -c "[ \"\$(sudo zfs get -H -o value zfsrecvd:last-recv $DEST2)\" != '-' ]"
+check "T3 second dest stamp"   bash -c "[ \"\$(sudo zfs get -H -o value stevedore:last-recv $DEST2)\" != '-' ]"
 grep -q "0 failed" /tmp/fleet1.log && ok "T3 no failures reported" || { bad "T3 failures"; tail -n 30 /tmp/fleet1.log; }
 
 echo "=== T4: teardown left nothing behind ==="
 check "T4 run dir removed"     bash -c "! sudo test -e /run/stevedore"
 check "T4 run listeners gone"  bash -c "! ss -tln | grep -q ':$RUNPORT '"
-check "T4 unit inactive"       bash -c "! systemctl is-active --quiet zfsrecvd-run-vmrecv"
-check "T4 unit2 inactive"      bash -c "! systemctl is-active --quiet zfsrecvd-run-vmrecv2"
+check "T4 unit inactive"       bash -c "! systemctl is-active --quiet stevedore-run-vmrecv"
+check "T4 unit2 inactive"      bash -c "! systemctl is-active --quiet stevedore-run-vmrecv2"
 check "T4 local rundirs gone"  bash -c "! ls -d /tmp/stevedore-fleet.* 2>/dev/null | grep -q ."
 static_sum2=$(sudo sha256sum /etc/stevedore/client.pem /etc/stevedore/server.pem /etc/stevedore/ca.pem | sha256sum)
 check "T4 static certs untouched" test "$static_sum" = "$static_sum2"
@@ -141,9 +141,9 @@ sudo dd if=/dev/urandom of=/dev/zvol/ztest/src/vol bs=1M count=4 oflag=direct 2>
 rc=$?
 check "T6 rc=0" test "$rc" -eq 0
 grep -q "0 failed" /tmp/fleet3.log && ok "T6 clean" || { bad "T6 failures"; tail -n 30 /tmp/fleet3.log; }
-n_snaps=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST" | grep -c zfsrecvd-)
+n_snaps=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST" | grep -c stevedore-)
 check "T6 two run snapshots on dest (got $n_snaps)" test "$n_snaps" -ge 2
-n_snaps2=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST2" | grep -c zfsrecvd-)
+n_snaps2=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST2" | grep -c stevedore-)
 check "T6 two run snapshots on dest2 (got $n_snaps2)" test "$n_snaps2" -ge 2
 
 echo "=== T7: generated artifacts: retention keep-counts, jobs, workers ==="
@@ -169,9 +169,9 @@ sed 's/hourly=24/hourly=1/' ~/fleet-test.conf > ~/fleet-prune.conf
 /usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-prune.conf >/tmp/fleet5.log 2>&1
 rc=$?
 check "T8 rc=0" test "$rc" -eq 0
-n_src=$(sudo zfs list -H -t snapshot -d 1 -o name ztest/src | grep -c zfsrecvd-)
+n_src=$(sudo zfs list -H -t snapshot -d 1 -o name ztest/src | grep -c stevedore-)
 check "T8 source pruned to 1 (got $n_src)" test "$n_src" = "1"
-n_dst=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST" | grep -c zfsrecvd-)
+n_dst=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST" | grep -c stevedore-)
 check "T8 dest history kept (got $n_dst)" test "$n_dst" -ge 2
 check "T8 prune lines in headless output" grep -q "pruning ztest/src@" /tmp/fleet5.log
 
@@ -207,9 +207,9 @@ sudo zfs list -H -t snapshot -d 1 -o name "$DEST"  | grep -q "@$new_src\$" && ok
 sudo zfs list -H -t snapshot -d 1 -o name "$DEST2" | grep -q "@$new_src\$" && ok "T10 new snapshot on dest2" || bad "T10 dest2 missing $new_src"
 
 echo "=== T11: haproxy teardown ==="
-check "T11 ha unit (sender) gone"   bash -c "! systemctl is-active --quiet zfsrecvd-ha-$CN"
-check "T11 ha unit vmrecv gone"     bash -c "! systemctl is-active --quiet zfsrecvd-ha-vmrecv"
-check "T11 ha unit vmrecv2 gone"    bash -c "! systemctl is-active --quiet zfsrecvd-ha-vmrecv2"
+check "T11 ha unit (sender) gone"   bash -c "! systemctl is-active --quiet stevedore-ha-$CN"
+check "T11 ha unit vmrecv gone"     bash -c "! systemctl is-active --quiet stevedore-ha-vmrecv"
+check "T11 ha unit vmrecv2 gone"    bash -c "! systemctl is-active --quiet stevedore-ha-vmrecv2"
 check "T11 no run ports left"       bash -c "! ss -tln | grep -E ':(15299|15300|15301|15363|15364) ' | grep -q ."
 check "T11 teardown quiet (no spurious warnings)" bash -c "! grep -q 'WARNING.*still active' /tmp/fleet7.log && ! grep -q 'could not stop' /tmp/fleet7.log"
 
@@ -218,22 +218,22 @@ echo "=== T12: retention grid thins the receiver at ENDTREE ==="
 # correctly keeps rep+frontier and thins nothing -- so fabricate
 # yesterday's history by NAME (names are the grid's clock) and assert
 # hourly=1 culls it while the frontier survives.
-sudo zfs snapshot "$DEST@zfsrecvd-2026-07-28-0800Z"
-sudo zfs snapshot "$DEST@zfsrecvd-2026-07-28-0900Z"
+sudo zfs snapshot "$DEST@stevedore-2026-07-28-0800Z"
+sudo zfs snapshot "$DEST@stevedore-2026-07-28-0900Z"
 sudo zfs snapshot "$DEST@keepme-manual"
 sed 's/^destination.*/destination   hourly=1/' ~/fleet-test.conf > ~/fleet-grid.conf
-pre=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST" | grep -c zfsrecvd-)
-ZFSRECVD_SHOW_PRUNES=1 /usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-grid.conf >/tmp/fleet8.log 2>&1
+pre=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST" | grep -c stevedore-)
+STEVEDORE_SHOW_PRUNES=1 /usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-grid.conf >/tmp/fleet8.log 2>&1
 rc=$?
 check "T12 rc=0" test "$rc" -eq 0
 grep -q "0 failed" /tmp/fleet8.log && ok "T12 clean" || { bad "T12 failures"; tail -n 30 /tmp/fleet8.log; }
-post=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST" | grep -c zfsrecvd-)
+post=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST" | grep -c stevedore-)
 check "T12 dest thinned ($pre -> $post)" test "$post" -lt "$pre"
 check "T12 yesterday's fakes culled" bash -c "! sudo zfs list -H -t snapshot -d 1 -o name $DEST | grep -q 2026-07-28-0"
 check "T12 frontier survived (got $post)" test "$post" -ge 1
 check "T12 manual snap untouched by grid" sudo zfs list -H "$DEST@keepme-manual"
 grep -q "receiver-only snapshots" /tmp/fleet8.log && bad "T12 retired NOTE still prints" || ok "T12 receiver-only NOTE retired"
-us=$(sudo zfs get -H -s local -o value zfsrecvd:unknown-since "$DEST@keepme-manual" 2>/dev/null)
+us=$(sudo zfs get -H -s local -o value stevedore:unknown-since "$DEST@keepme-manual" 2>/dev/null)
 if [ -n "$us" ] && [ "$us" != "-" ]; then ok "T12 manual snap stamped unknown-since"; else bad "T12 stamp missing (got '$us')"; fi
 grep -q "^GC-TRACK: " /tmp/fleet8.log && bad "T12 track lines leaked to console" || ok "T12 track lines off the console"
 grep -q "gc: \[vmrecv\]" /tmp/fleet8.log && ok "T12 gc stage ran" || { bad "T12 gc stage"; tail -n 20 /tmp/fleet8.log; }
@@ -254,11 +254,11 @@ rdbg=$(/usr/local/lib/stevedore/stevedore-report.sh --gc-debug 2>/dev/null)
 grep -q "gc \[vmrecv\] track .*@keepme-manual: unknown-since" <<<"$rdbg" && ok "T12 --gc-debug surfaces the inventory" || { bad "T12 gc-debug"; grep "gc \[" <<<"$rdbg" | head -n 6; }
 grep -qE "^  receiver +net +pruned +avail$" <<<"$rout" && ok "T12 report.sh receiver table" || { bad "T12 recv table"; echo "$rout" | head -n 12; }
 grep -q "  gc \[" <<<"$rout" && ok "T12 report.sh gc section" || { bad "T12 gc section"; echo "$rout" | head -n 20; }
-grep -q "pruned: \[vmrecv\] .*@zfsrecvd-2026-07-28-0800Z" /tmp/fleet8.log && ok "T12 SHOW_PRUNES names the destroyed" || { bad "T12 show prunes"; grep -a "pruned:" /tmp/fleet8.log | head -n 5; }
+grep -q "pruned: \[vmrecv\] .*@stevedore-2026-07-28-0800Z" /tmp/fleet8.log && ok "T12 SHOW_PRUNES names the destroyed" || { bad "T12 show prunes"; grep -a "pruned:" /tmp/fleet8.log | head -n 5; }
 
 echo "=== T13: replication cursors: exactly one per (dataset, dest) ==="
-n_c1=$(sudo zfs list -H -t bookmark -d 1 -o name ztest/src | grep -c '#zfsrecvd-vmrecv-')
-n_c2=$(sudo zfs list -H -t bookmark -d 1 -o name ztest/src | grep -c '#zfsrecvd-vmrecv2-')
+n_c1=$(sudo zfs list -H -t bookmark -d 1 -o name ztest/src | grep -c '#stevedore-vmrecv-')
+n_c2=$(sudo zfs list -H -t bookmark -d 1 -o name ztest/src | grep -c '#stevedore-vmrecv2-')
 check "T13 one cursor for vmrecv (got $n_c1)"  test "$n_c1" = "1"
 check "T13 one cursor for vmrecv2 (got $n_c2)" test "$n_c2" = "1"
 
@@ -281,33 +281,33 @@ sudo zfs create ztest/recv/$CN/oldcrap
 sudo zfs create ztest/recv/$CN/stale
 # canaries sit at CN level, OUTSIDE any session tree -- no run touches
 # their clocks, so a manual orphan-since stands in for a server stamp
-sudo zfs set "zfsrecvd:orphan-since=$(date -u +%Y-%m-%dT%H:%M:%SZ)" ztest/recv/$CN/stale
+sudo zfs set "stevedore:orphan-since=$(date -u +%Y-%m-%dT%H:%M:%SZ)" ztest/recv/$CN/stale
 # deep unstamped child under a STAMPED parent: inherited properties must
 # not cloak it (the owner's no-such-zvol find). It gets a snapshot so it
 # enters the server's state model -- SNAPLESS datasets are outside it
 # (§5) and stay in the UNSTAMPED listing instead of being clocked.
 sudo zfs create "$DEST/deepcrap"
 sudo zfs snapshot "$DEST/deepcrap@junk"
-out=$(sudo env ZFSRECVD_CONF=/etc/stevedore/stevedore.conf /usr/local/lib/stevedore/stevedore-gc.sh 2>&1)
+out=$(sudo env STEVEDORE_CONF=/etc/stevedore/stevedore.conf /usr/local/lib/stevedore/stevedore-gc.sh 2>&1)
 grep -q "oldcrap: UNSTAMPED" <<<"$out" && ok "T15 unstamped crap surfaced" || { bad "T15 unstamped"; echo "$out"; }
 grep -q "deepcrap: UNSTAMPED" <<<"$out" && ok "T15 deep unstamped not cloaked by inheritance" || { bad "T15 deepcrap"; echo "$out"; }
 grep -q "/ztest: UNSTAMPED" <<<"$out" && bad "T15 container noise" || ok "T15 containers stay quiet"
 grep -q "stale: ABSENT AT SOURCE" <<<"$out" && bad "T15 warned inside the quiet window" || ok "T15 day-0 clock quiet on console"
 grep -q "GC-TRACK: ztest/recv/$CN/stale: orphan-since" <<<"$out" && ok "T15 clock tracked from day 0" || { bad "T15 track"; echo "$out"; }
-out2=$(sudo env ZFSRECVD_GC_WARN_DAYS=0 ZFSRECVD_CONF=/etc/stevedore/stevedore.conf /usr/local/lib/stevedore/stevedore-gc.sh 2>&1)
+out2=$(sudo env STEVEDORE_GC_WARN_DAYS=0 STEVEDORE_CONF=/etc/stevedore/stevedore.conf /usr/local/lib/stevedore/stevedore-gc.sh 2>&1)
 grep -q "stale: ABSENT AT SOURCE -- since .*eligible for reclaim in" <<<"$out2" && ok "T15 warn knob brings the click forward" || { bad "T15 warn knob"; echo "$out2"; }
 grep -q "datasets, newest recv" <<<"$out2" && ok "T15 warned CN gets its summary line" || { bad "T15 summary"; echo "$out2"; }
-out3=$(sudo env ZFSRECVD_GC_GRACE_DAYS=0 ZFSRECVD_CONF=/etc/stevedore/stevedore.conf /usr/local/lib/stevedore/stevedore-gc.sh 2>&1)
+out3=$(sudo env STEVEDORE_GC_GRACE_DAYS=0 STEVEDORE_CONF=/etc/stevedore/stevedore.conf /usr/local/lib/stevedore/stevedore-gc.sh 2>&1)
 grep -q "stale: RECLAIM-ELIGIBLE" <<<"$out3" && ok "T15 grace knob turns down" || { bad "T15 knob"; echo "$out3"; }
 check "T15 nothing destroyed" sudo zfs list -H ztest/recv/$CN/oldcrap ztest/recv/$CN/stale
 
 echo "=== T16: GC knobs forward through fleetrun over ssh ==="
-ZFSRECVD_GC_WARN_DAYS=0 ZFSRECVD_GC_GRACE_DAYS=0 /usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-test.conf >/tmp/fleet10.log 2>&1
+STEVEDORE_GC_WARN_DAYS=0 STEVEDORE_GC_GRACE_DAYS=0 /usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-test.conf >/tmp/fleet10.log 2>&1
 rc=$?
 check "T16 rc=0" test "$rc" -eq 0
 grep -q "stale: RECLAIM-ELIGIBLE" /tmp/fleet10.log && ok "T16 knobs reached the receiver" || { bad "T16 knobs"; grep -a "GC:" /tmp/fleet10.log | head -n 8; }
 # the run itself must have clocked the in-tree manifest-absent canary
-dos=$(sudo zfs get -H -s local -o value zfsrecvd:orphan-since "$DEST/deepcrap" 2>/dev/null)
+dos=$(sudo zfs get -H -s local -o value stevedore:orphan-since "$DEST/deepcrap" 2>/dev/null)
 if [ -n "$dos" ] && [ "$dos" != "-" ]; then ok "T16 manifest-absent dataset clocked by the run"; else bad "T16 deepcrap unclocked (got '$dos')"; fi
 
 echo "=== T17: ec2 cadence: fresh destinations skip; --force-ec2 overrides ==="
@@ -393,13 +393,62 @@ rc=$?
 check "T18 check rc=0" test "$rc" -eq 0
 grep -q "SKIPPED (--skip-ec2)" /tmp/fleet18.log && ok "T18 check lists the drop" || { bad "T18 check"; grep -a "job:" /tmp/fleet18.log; }
 
+echo "=== T19: steve migrate renames the estate (transitional cutover tool) ==="
+# Seed OLD-name objects as if this box had never been renamed: a
+# prefixed snapshot, a cursor bookmark (prefix AND embedded snapname),
+# and both property stamps. migrate must rename/re-mint/restamp them
+# host-wide, verify zero residue, be idempotent, and reverse with
+# --back. Targets come from fleet.conf; every identity here is
+# localhost, so visit 1 does the work and the rest no-op.
+sudo zfs snapshot "$DEST/b@zfsrecvd-2026-07-20-0800Z"
+sudo zfs bookmark "$DEST/b@zfsrecvd-2026-07-20-0800Z" "$DEST/b#zfsrecvd-somedest-zfsrecvd-2026-07-20-0800Z"
+sudo zfs set zfsrecvd:orphan-since=2026-01-01T00:00:00Z "$DEST/b"
+sudo zfs set zfsrecvd:unknown-since=2026-01-02T00:00:00Z "$DEST/b@zfsrecvd-2026-07-20-0800Z"
+mg_guid=$(sudo zfs get -H -o value guid "$DEST/b#zfsrecvd-somedest-zfsrecvd-2026-07-20-0800Z")
+bash ~/zfsrecvd-src/stevedore.sh migrate -c ~/fleet-test.conf >/tmp/mig1.log 2>&1
+rc=$?
+check "T19 migrate rc=0" test "$rc" -eq 0
+grep -q "migrate: fleet clean" /tmp/mig1.log && ok "T19 fleet clean verdict" || { bad "T19 verdict"; cat /tmp/mig1.log; }
+grep -q "residue 0/0/0" /tmp/mig1.log && ok "T19 zero residue verified" || { bad "T19 residue"; cat /tmp/mig1.log; }
+check "T19 snapshot renamed"      sudo zfs list -H "$DEST/b@stevedore-2026-07-20-0800Z"
+check "T19 old snapshot gone"     bash -c "! sudo zfs list -H '$DEST/b@zfsrecvd-2026-07-20-0800Z' 2>/dev/null"
+check "T19 cursor re-minted"      sudo zfs list -H -t bookmark "$DEST/b#stevedore-somedest-stevedore-2026-07-20-0800Z"
+check "T19 old cursor gone"       bash -c "! sudo zfs list -H -t bookmark '$DEST/b#zfsrecvd-somedest-zfsrecvd-2026-07-20-0800Z' 2>/dev/null"
+mg_guid2=$(sudo zfs get -H -o value guid "$DEST/b#stevedore-somedest-stevedore-2026-07-20-0800Z" 2>/dev/null)
+check "T19 cursor guid preserved" test "$mg_guid" = "$mg_guid2"
+mos=$(sudo zfs get -H -s local -o value stevedore:orphan-since "$DEST/b" 2>/dev/null)
+check "T19 dataset stamp migrated (got $mos)" test "$mos" = "2026-01-01T00:00:00Z"
+mos2=$(sudo zfs get -H -s local,received -o value zfsrecvd:orphan-since "$DEST/b" 2>/dev/null)
+if [ -z "$mos2" ] || [ "$mos2" = "-" ]; then ok "T19 old dataset stamp stripped"; else bad "T19 old stamp survived ($mos2)"; fi
+mus=$(sudo zfs get -H -s local -o value stevedore:unknown-since "$DEST/b@stevedore-2026-07-20-0800Z" 2>/dev/null)
+check "T19 snapshot stamp rode the rename (got $mus)" test "$mus" = "2026-01-02T00:00:00Z"
+# idempotent rerun: nothing left to do, still clean
+bash ~/zfsrecvd-src/stevedore.sh migrate -c ~/fleet-test.conf >/tmp/mig2.log 2>&1
+rc=$?
+check "T19 rerun rc=0" test "$rc" -eq 0
+grep -q "renamed 0 snapshot(s), 0 cursor(s), 0" /tmp/mig2.log && ok "T19 rerun is a no-op" || { bad "T19 rerun"; cat /tmp/mig2.log; }
+# --back reverses (guid still riding along), then forward again so the
+# box ends in the new-name state
+bash ~/zfsrecvd-src/stevedore.sh migrate --back -c ~/fleet-test.conf >/tmp/mig3.log 2>&1
+rc=$?
+check "T19 --back rc=0" test "$rc" -eq 0
+check "T19 --back restored old snapshot" sudo zfs list -H "$DEST/b@zfsrecvd-2026-07-20-0800Z"
+mg_guid3=$(sudo zfs get -H -o value guid "$DEST/b#zfsrecvd-somedest-zfsrecvd-2026-07-20-0800Z" 2>/dev/null)
+check "T19 --back cursor guid intact" test "$mg_guid" = "$mg_guid3"
+bash ~/zfsrecvd-src/stevedore.sh migrate -c ~/fleet-test.conf >/tmp/mig4.log 2>&1
+rc=$?
+check "T19 forward-again rc=0" test "$rc" -eq 0
+# NB --back moved EVERY stevedore-* object to zfsrecvd-* and forward
+# moved them back -- including the whole suite's run snapshots and
+# cursors; the round trip proving they all survive IS the test.
+
 echo
 echo "=== RESULT: $PASS passed, $FAIL failed ==="
 if [ "$FAIL" -gt 0 ]; then
     for f in /tmp/fleet1.log /tmp/fleet2.log /tmp/fleet3.log /tmp/fleet4.log /tmp/fleet5.log /tmp/fleet6.log /tmp/fleet7.log /tmp/fleet8.log /tmp/fleet9.log /tmp/fleet10.log /tmp/fleet11.log /tmp/fleet12.log /tmp/fleet13.log /tmp/fleet14.log /tmp/fleet15.log /tmp/fleet16.log /tmp/fleet17.log /tmp/fleet18.log; do
         [ -f "$f" ] && { echo "--- $f tail ---"; tail -n 25 "$f"; }
     done
-    for u in zfsrecvd-run-vmrecv zfsrecvd-run-vmrecv2 zfsrecvd-ha-vmrecv zfsrecvd-ha-vmrecv2; do
+    for u in stevedore-run-vmrecv stevedore-run-vmrecv2 stevedore-ha-vmrecv stevedore-ha-vmrecv2; do
         echo "--- $u journal ---"
         sudo journalctl -u "$u" -n 30 --no-pager 2>/dev/null | tail -n 30
     done

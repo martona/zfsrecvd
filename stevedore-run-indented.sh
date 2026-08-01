@@ -24,7 +24,7 @@
 # Only sendtree's chatter and pv's progress flow through here (never the
 # zfs stream), so the byte loop's throughput is a non-issue.
 #
-# ZFSRECVD_INDENT tells descendants how many columns of prefix will be
+# STEVEDORE_INDENT tells descendants how many columns of prefix will be
 # glued onto their lines: anything that sizes output to the terminal
 # width (pv, see sendtree.sh) must shrink by that amount, or the line
 # exceeds the terminal width, wraps, and \r-refreshes land on fresh rows
@@ -34,7 +34,7 @@
 
 run_indented() {
     local prefix=$1; shift
-    ZFSRECVD_INDENT=$(( ${ZFSRECVD_INDENT:-0} + ${#prefix} )) \
+    STEVEDORE_INDENT=$(( ${STEVEDORE_INDENT:-0} + ${#prefix} )) \
     "$@" 2>&1 | {
         # one printf per completed record = one write(): concurrent jobs
         # interleave at record granularity, the same guarantee gawk gave

@@ -40,8 +40,8 @@ V_OK="${SIG}2111001e${ADDR4}${SSLTLV}"                  # len 12+18 = 30 = 0x001
 r=$(run_case "$V_OK")
 [[ "$r" == "OK:jupiter" ]] && ok "valid TCP4 header -> CN jupiter" || bad "valid: $r"
 
-r=$(run_case "$V_OK" "zfsrecvd2.0")
-[[ "$r" == "OK:jupiter:zfsrecvd2.0" ]] && ok "byte-exact: greeting intact after header" || bad "byte-exact: $r"
+r=$(run_case "$V_OK" "stevedore2.0")
+[[ "$r" == "OK:jupiter:stevedore2.0" ]] && ok "byte-exact: greeting intact after header" || bad "byte-exact: $r"
 
 r=$(run_case "0e${V_OK:2}")
 [[ "$r" == REFUSED:* ]] && ok "bad signature refused" || bad "bad sig: $r"

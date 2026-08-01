@@ -31,7 +31,7 @@ STEVE_HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 source "$STEVE_HERE/stevedore-paths.sh"
 
 usage() {
-    echo "usage: steve install | run [args] | report [args] | check | unlock <replica> | uninstall [--purge] | help" >&2
+    echo "usage: steve install | run [args] | report [args] | check | unlock <replica> | migrate [--back] [-c fleet.conf] [host ...] | uninstall [--purge] | help" >&2
     exit 64
 }
 
@@ -150,7 +150,7 @@ do_check() {
         warn "no $STEVE_ETC/fleet.conf (not an orchestrator box, or not configured yet)"
     fi
     if [[ -f "$STEVE_ETC/stevedore.conf" ]]; then
-        if (bash -c "set -u; ZFSRECVD_CONF='$STEVE_ETC/stevedore.conf' source '$STEVE_HERE/stevedore-cfgparser.sh'") >/dev/null 2>&1; then
+        if (bash -c "set -u; STEVEDORE_CONF='$STEVE_ETC/stevedore.conf' source '$STEVE_HERE/stevedore-cfgparser.sh'") >/dev/null 2>&1; then
             ok "stevedore.conf parses"
         else
             fail "stevedore.conf does not parse"
@@ -197,20 +197,49 @@ do_check() {
                 probe_pids+=( $! )
                 probe_hosts+=( "$h" )
             done <<<"$hosts"
+            local probe_dests=() reach=() reach_dests=()
+            probe_dests=()
+            while read -r h dest; do
+                [[ -n "$h" ]] && probe_dests+=( "$dest" )
+            done <<<"$hosts"
             for (( i = 0; i < ${#probe_pids[@]}; i++ )); do
-                wait "${probe_pids[i]}" || unreach+=( "${probe_hosts[i]}" )
+                if wait "${probe_pids[i]}"; then
+                    reach+=( "${probe_hosts[i]}" )
+                    reach_dests+=( "${probe_dests[i]}" )
+                else
+                    unreach+=( "${probe_hosts[i]}" )
+                fi
             done
             if [[ ${#unreach[@]} -eq 0 ]]; then
                 ok "all ${#probe_hosts[@]} fleet participants reachable"
             else
                 warn "unreachable participants (offline or EC2 asleep is normal): ${unreach[*]}"
             fi
+
+            # TRANSITIONAL (delete with `steve migrate` once the fleet is
+            # renamed): old-name residue means a host missed the migrate --
+            # it would name-desync on its next run and wastefully
+            # re-bootstrap (§24 straggler guard).
+            local rr rrs rrb rrp dirty=0
+            for (( i = 0; i < ${#reach[@]}; i++ )); do
+                rr=$(ssh "${ssh_opts[@]}" "${reach_dests[i]}" \
+                    "sudo -n sh -c 's=\$(zfs list -H -t snapshot -o name 2>/dev/null | grep -c @zfsrecvd- ); b=\$(zfs list -H -r -t bookmark -o name 2>/dev/null | grep -c '\''#zfsrecvd-'\'' ); p=\$(zfs get -H -t filesystem,volume,snapshot -s local,received -o name zfsrecvd:last-recv,zfsrecvd:orphan-since,zfsrecvd:unknown-since 2>/dev/null | wc -l); echo \"\$s \$b \$p\"'" \
+                    </dev/null 2>/dev/null) || rr=""
+                read -r rrs rrb rrp <<<"$rr"
+                if [[ "$rrs$rrb$rrp" =~ ^[0-9]+$ ]] && (( rrs + rrb + rrp > 0 )); then
+                    dirty=1
+                    warn "old-name residue on [${reach[i]}]: $rrs snaps, $rrb cursors, $rrp props -- run: steve migrate ${reach[i]}"
+                fi
+            done
+            if [[ ${#reach[@]} -gt 0 && $dirty -eq 0 ]]; then
+                ok "no old-name residue on ${#reach[@]} reachable participant(s)"
+            fi
         fi
     fi
 
     # leftovers from crashed runs
     local units
-    units=$(systemctl list-units --no-legend --plain 'zfsrecvd-run-*' 'zfsrecvd-ha-*' 2>/dev/null | awk '{print $1}') || units=""
+    units=$(systemctl list-units --no-legend --plain 'stevedore-run-*' 'stevedore-ha-*' 2>/dev/null | awk '{print $1}') || units=""
     if [[ -n "$units" ]]; then
         warn "leftover run units active (crashed run?): $(echo $units)"
     else
@@ -223,6 +252,118 @@ do_check() {
     fi
 
     exit "$bad"
+}
+
+# TRANSITIONAL (§24): the one-time zfsrecvd -> stevedore estate rename.
+# Delete this payload, do_migrate, and check's residue probes once the
+# fleet is migrated.
+#
+# Self-contained on purpose: migrate runs BEFORE the first new-code fleet
+# run, so participants have no stevedore scripts yet -- the payload rides
+# ssh stdin and needs nothing but zfs on the far end. All idempotent:
+# already-renamed objects no longer match the old-name filters, and a
+# leftover cursor whose copy already exists is simply destroyed.
+MIGRATE_PAYLOAD='
+set -euo pipefail
+dir="${1:-fwd}"
+OLD=zfsrecvd NEW=stevedore
+if [ "$dir" = back ]; then OLD=stevedore NEW=zfsrecvd; fi
+rs=0; rb=0; rp=0
+# snapshots: host-wide -- any ${OLD}-prefixed snap is ours by
+# construction (.gone subtrees, deep grids, canaries included). Only the
+# @name part is transformed; dataset paths are never touched.
+while IFS= read -r s; do
+    base="${s%@*}"; name="${s#*@}"
+    zfs rename "$s" "${base}@${NEW}-${name#${OLD}-}"
+    rs=$((rs+1))
+done < <(zfs list -H -t snapshot -o name 2>/dev/null | grep "@${OLD}-" || true)
+# cursors: bookmarks cannot be renamed, but a bookmark COPY carries the
+# same guid (verified zfs 2.4.1) -- lineage evidence survives. The
+# substitution is global within the bookmark name so the embedded
+# snapname translates along with the prefix.
+while IFS= read -r b; do
+    base="${b%#*}"; name="${b#*#}"
+    nn=$(printf "%s" "$name" | sed "s/${OLD}-/${NEW}-/g")
+    if ! zfs list -H -t bookmark -o name "${base}#${nn}" >/dev/null 2>&1; then
+        zfs bookmark "$b" "${base}#${nn}"
+    fi
+    zfs destroy "$b"
+    rb=$((rb+1))
+done < <(zfs list -H -r -t bookmark -o name 2>/dev/null | grep "#${OLD}-" || true)
+# properties: copy to the new name (a LOCAL stamp either way -- local
+# and received both count as stamps), then inherit the old name, which
+# clears local AND received (suite-proven, no resurrection).
+while IFS=$'"'"'\t'"'"' read -r n prop val; do
+    [ -n "$n" ] || continue
+    [ "$val" != "-" ] || continue
+    zfs set "${NEW}:${prop#*:}=${val}" "$n"
+    zfs inherit "$prop" "$n"
+    rp=$((rp+1))
+done < <(zfs get -H -t filesystem,volume,snapshot -s local,received -o name,property,value \
+    "${OLD}:last-recv,${OLD}:orphan-since,${OLD}:unknown-since" 2>/dev/null || true)
+# verify: nothing old-named may remain on this host
+vs=$(zfs list -H -t snapshot -o name 2>/dev/null | grep -c "@${OLD}-" || true)
+vb=$(zfs list -H -r -t bookmark -o name 2>/dev/null | grep -c "#${OLD}-" || true)
+vp=$(zfs get -H -t filesystem,volume,snapshot -s local,received -o name \
+    "${OLD}:last-recv,${OLD}:orphan-since,${OLD}:unknown-since" 2>/dev/null | wc -l)
+echo "renamed $rs snapshot(s), $rb cursor(s), $rp propert(ies); residue $vs/$vb/$vp"
+[ "$((vs+vb+vp))" -eq 0 ]
+'
+
+do_migrate() {
+    local dir="fwd" conf="$STEVE_ETC/fleet.conf" targets=() t a known
+    while (( $# > 0 )); do
+        case "$1" in
+            --back)      dir="back"; shift ;;
+            -c|--config) conf="${2:?}"; shift 2 ;;
+            -*)          usage ;;
+            *)           targets+=( "$1" ); shift ;;
+        esac
+    done
+    if [[ ! -f "$conf" ]]; then
+        echo "ERROR: $conf required (migrate runs on the orchestrator and dials the fleet)" >&2
+        exit 78
+    fi
+    source "$STEVE_HERE/stevedore-ec2helpers.sh"
+    source "$STEVE_HERE/stevedore-fleetparser.sh"
+    fleet_parse "$conf"
+    if [[ ${#targets[@]} -eq 0 ]]; then
+        targets=( "${fleet_participants[@]}" )
+    else
+        for t in "${targets[@]}"; do
+            known=""
+            for a in "${fleet_participants[@]}"; do
+                [[ "$a" == "$t" ]] && known=1
+            done
+            [[ -n "$known" ]] || { echo "ERROR: '$t' is not a fleet.conf participant" >&2; exit 78; }
+        done
+    fi
+    # no concurrent runs while the estate renames under them
+    orch_lock
+    # EC2 participants hold stamps and snaps too -- wake what we visit
+    orchec2up=()
+    for t in "${targets[@]}"; do
+        [[ -n "${fleet_host_ec2[$t]:-}" ]] && orchec2up+=( "${fleet_host_ec2[$t]}" )
+    done
+    ec2_maybe_start
+
+    local failed=() id dest out
+    for id in "${targets[@]}"; do
+        dest=$(fleet_ssh_dest "$id")
+        echo "migrate: [$id] ($dir)" >&2
+        if out=$(ssh "${ssh_opts[@]}" "$dest" "sudo -n bash -s -- $dir" <<<"$MIGRATE_PAYLOAD" 2>&1); then
+            sed 's/^/  /' <<<"$out" >&2
+        else
+            sed 's/^/  /' <<<"$out" >&2
+            echo "  ERROR: migrate failed on [$id] -- rerun with: steve migrate [--back] $id" >&2
+            failed+=( "$id" )
+        fi
+    done
+    if [[ ${#failed[@]} -gt 0 ]]; then
+        echo "migrate: FAILED on: ${failed[*]} (rerun per host before it rejoins fleet runs)" >&2
+        exit 1
+    fi
+    echo "migrate: fleet clean (${#targets[@]} host(s), direction $dir)" >&2
 }
 
 do_help() {
@@ -240,11 +381,14 @@ steve -- fleet ZFS replication (stevedore)
                               crashed-run leftovers
   steve unlock <replica>      load a received replica's keys from its own
                               keystore (read-only; LUKS or plain)
+  steve migrate [--back] [h]  TRANSITIONAL: the one-time zfsrecvd ->
+                              stevedore estate rename (snapshots, cursors,
+                              properties; per host, idempotent)
   steve install / uninstall   [--purge] also removes config + ledger
 
 Knobs (env, on the steve run command line):
-  ZFSRECVD_SHOW_PRUNES=1      name every snapshot destroyed by the run
-  ZFSRECVD_GC_WARN_DAYS= / ZFSRECVD_GC_GRACE_DAYS=
+  STEVEDORE_SHOW_PRUNES=1      name every snapshot destroyed by the run
+  STEVEDORE_GC_WARN_DAYS= / STEVEDORE_GC_GRACE_DAYS=
                               GC thresholds, forwarded to receivers
                               (warn-only build: 0 is safe, nothing destroys)
 
@@ -261,6 +405,7 @@ case "$cmd" in
     run)       exec "$STEVE_HERE/stevedore-fleetrun.sh" "$@" ;;
     report)    exec "$STEVE_HERE/stevedore-report.sh" "$@" ;;
     unlock)    exec "$STEVE_HERE/stevedore-unlock-replica.sh" "$@" ;;
+    migrate)   do_migrate "$@" ;;
     check)     do_check ;;
     help|-h|--help) do_help ;;
     *)         usage ;;

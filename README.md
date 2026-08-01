@@ -1,48 +1,78 @@
-# zfsrecvd
-A crummy but long-fat-pipe-friendly replication helper for zfs
+# stevedore
+
+A crummy but long-fat-pipe-friendly fleet replication tool for zfs.
+(Formerly `zfsrecvd`; a stevedore loads cargo between ships and docks —
+bulk transfer, reliably, no glamour.)
 
 ## Why
 
-SSH doesn't cut it when it comes to sending ZFS snapshots to faraway lands. OpenSSH's baked-in 2MB window limit was already too small in 2007 when it was finally increased from 64K. There are alternatives such as [hpn-ssh]([https://github.com/rapier1/hpn-ssh) but that is a whole-ass SSH fork, something I'm not brave enough for.
+SSH doesn't cut it when it comes to sending ZFS snapshots to faraway lands. OpenSSH's baked-in 2MB window limit was already too small in 2007 when it was finally increased from 64K. There are alternatives such as [hpn-ssh](https://github.com/rapier1/hpn-ssh) but that is a whole-ass SSH fork, something I'm not brave enough for.
 
-Stock OpenSSH caps long fat pipes very harshly. As an example, I'm getting 500Mbits on a 30ms link to the nearest AWS datacenter through its small window. With OpenSSH replaced, I get 4Gbits. 
+Stock OpenSSH caps long fat pipes very harshly. As an example, I'm getting 500Mbits on a 30ms link to the nearest AWS datacenter through its small window. With OpenSSH replaced, I get 4Gbits.
 
 None of this is rocket science, nor do I expect it to interest anyone, but I do use it a lot. Github is an ideal place to clone it from, and there's no point in keeping it private either.
 
 ## What
 
-Instead of SSH, I use Wireguard for linking the EC2 instance to my network, then `socat` to move the zfs-send between boxes. The wire protocol runs one TLS session per dataset tree, multiplexes the zfs streams over it, and reports per-dataset results in-band; `vmtest.sh` is an end-to-end suite that exercises all of it against a throwaway file-backed pool. There's a recv-side script (auto-spawned by a systemd service) that handles mutual TLS authentication, and a send-side script to assist with finding common snapshot ancestors, then they both hand traffic over to `zfs send` and `zfs recv`.
+One config file (`/etc/stevedore/fleet.conf`) describes the fleet: hosts, jobs (source, tree, destination), retention. A run provisions everything else itself:
 
-Requirements:
+- per-run CA and certs (minted at run start, discarded at teardown — the private keys never leave the hosts they're minted on),
+- per-run listeners as transient systemd units (socat mTLS, or haproxy terminating TLS with PROXY-protocol identity for higher throughput),
+- the scripts themselves, shipped to every participant each run — participants are stateless; onboarding a sender is one job row, an ssh key, and three packages.
 
-```
-pv
-zfsutils-linux
-socat
-gawk
-```
+The wire protocol (v2.1) runs one TLS session per dataset tree, multiplexes raw zfs streams over it with no framing, exchanges snapshot+GUID manifests so lineage collisions are refused or renamed aside instead of clobbered, and reports per-dataset results in-band. Retention is a global grid (hourlies on senders, a deep hourly/daily/weekly/monthly grid on receivers), replication cursors (bookmarks) survive total source snapshot loss, and orphan/receiver-only detection runs warn-only with long grace clocks. `runs.jsonl` is the ledger; `steve report` renders it.
 
-The setup also assumes systemd.
+Requirements: `zfsutils-linux socat pv openssl` (plus `haproxy` for that transport), systemd, and ssh with passwordless sudo between the orchestrator and participants.
 
 ## Install
 
-Create `/etc/zfsrecvd` and copy the contents of this directory there. 
+Only the orchestrator needs an install; participants get everything per run.
 
-On the receive side: 
+```
+git clone <this repo> && cd stevedore
+sudo bash stevedore.sh install
+```
 
-- Edit `/etc/zfsrecvd/zfsrecvd.conf` to set up the mTLS auth whitelist and specify the dataset that will be the root for whatever `zfs recv` will store.
-- Provide `server.pem`, `server.key` and `ca.pem`. The `server.*` files are for the server's SSL certificiate (leaf cert and private key), `ca.pem` is used to verify the client-provided certificate.
-- Run `systemctl link /etc/zfsrecvd/zfsrecvd.service && systemctl enable --now zfsrecvd.service`. 
+That places the scripts in `/usr/local/lib/stevedore/`, links `/usr/local/bin/steve`, creates `/etc/stevedore/` and the ledger in `/var/lib/stevedore/` (owned by you, not root). Then write `/etc/stevedore/fleet.conf` and you're done:
 
-On the send side:
+```
+[options]
+user       marton
+port       5299
+transport  haproxy
 
-- Provide `client.pem`, `client.key` and `ca.pem`. The latter is used to verify the server's cert. The `client.*` files are the sender's identity. The CN field in the client cert has to be in the receive-side's auth whitelist. It's best to make this the same as the hostname. The recv-side script will also create a zfs dataset under the root that matches this name, and will create all datasets sent by this host under it, e.g. `tank/recv/hostname/tank/mydata@20250618`.
+[retention]
+source        hourly=24
+destination   hourly=48 daily=30 weekly=8 monthly=12
 
-This is also required on both ends to get the best out of your TCP stack:
+[hosts]
+bergamo     recv=tank/recv   data=bergamo.lan
+ec2backup   recv=ebs/recv    data=ec2-zfsrecv   ec2=i-0401...   cadence=24h
+
+[jobs]
+jupiter     nvmetank      bergamo
+bergamo     tank/backup   ec2backup
+```
+
+## Use
+
+```
+steve run              # one fleet run
+steve run --check      # plan preview, nothing provisioned
+steve report           # what happened, trends, gc findings
+steve check            # doctor
+steve help             # the rest
+```
+
+Manual single-dataset sends still work outside orchestrated runs (`/usr/local/lib/stevedore/stevedore-send.sh <ds[@snap]> <host>`), sending the newest snapshot if none is given, incremental against the newest common ancestor, `-R -w` (raw — encrypted datasets replicate without their keys ever being present on the receiver).
+
+## Tuning
+
+Required on both ends to get the best out of your TCP stack:
 
 ```
 sudo tee -a /etc/sysctl.d/99-fast-long-fat-tcp.conf << EOF
-# allow 64 MB socket buffers
+# allow 64 MB socket buffers
 net.core.rmem_max=67108864
 net.core.wmem_max=67108864
 
@@ -58,27 +88,8 @@ sudo sysctl --system
 
 ## Updating
 
-When iterating on the scripts: `git pull`, run `install.sh` to refresh this host, then run `/etc/zfsrecvd/deploy.sh` to push the scripts (and only the scripts — never certs or config) to every host named in the config: `[orchestrator-targets]` (as the listed user), plus `[sends]` destinations and `[allowed_hosts]` (as the current user), deduped. Targets need passwordless sudo for the connecting user, same as orchestrated runs. EC2 instances in `[orchestrator-ec2up]` are woken for the deploy and stopped after; a target with an active recv listener gets it restarted so the new code takes effect.
+`git pull && sudo bash stevedore.sh install` on the orchestrator. The next fleet run ships the new scripts to every participant; version skew within a run is impossible.
 
 ## Uninstall
 
-Just undo the above.
-
-## Use
-
-Invoke `/etc/zfsrecvd/send.sh` with the first parameter being the snapshot you're sending, the second parameter being the resolvable network name of the recv-side box, e.g.:
-
-```
-/etc/zfsrecvd/send.sh tank/mydata@20250618 ec2-zfsrecv
-```
-
-If you omit the snapshot specification, the script will find the most recent snapshot for the dataset. In other words, this works too:
-
-```
-/etc/zfsrecvd/send.sh tank/mydata ec2-zfsrecv
-```
-
-In either case, the script will determine the most recent snapshot that exists on both systems, and perform an incremental send against it. If no such snapshot exists, a full send will be performed.
-
-Send is always done with the -R and -w flags; the main implication of the first is that it's recursive and includes child datasets. The -w (raw) flag is most commonly used with encrypted snapshots, which mine are.
-
+`sudo steve uninstall` (code only; `--purge` also removes config and ledger).

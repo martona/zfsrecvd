@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# zfsrecvd protocol 2.1 receiver. socat (see listen.sh) spawns one
+# stevedore wire protocol 2.1 receiver. socat (see listen.sh) spawns one
 # instance per TLS connection; stdin/stdout are the socket, stderr goes to
 # the journal.
 #
@@ -88,11 +88,11 @@ log "session from: $safe_cn"
 # mixed-version fleet, and rollback is redeploying the previous commit,
 # both sides together).
 IFS= read -r -t 30 hello || { log "ERROR: no version line"; exit 1; }
-if ! [[ "$hello" =~ ^zfsrecvd2\.[0-9]+$ ]]; then
+if ! [[ "$hello" =~ ^stevedore2\.[0-9]+$ ]]; then
     log "ERROR: unsupported version '$hello'"
     exit 1
 fi
-out "OK zfsrecvd2.1"
+out "OK stevedore2.1"
 
 #
 # ---- session state ----------------------------------------------------------
@@ -573,7 +573,7 @@ prune_tree() {
 }
 
 # ENDTREE: prune, then stamp everything received this tree with
-# zfsrecvd:last-recv (marks the dataset as ours + records freshness; this
+# stevedore:last-recv (marks the dataset as ours + records freshness; this
 # is the foundation the future orphan GC reads). One zfs set for the whole
 # batch, with a per-dataset fallback in case a zfs version dislikes
 # multiple targets.
@@ -604,12 +604,12 @@ stamp_absent() {
         if [[ -n "$full" && "$g" != "-" ]]; then
             stamped[$full]=1
         fi
-    done < <(zfs get -H -r -s local,received -t snapshot -o name,value zfsrecvd:unknown-since "${dest_base}/${tree_root}" 2>/dev/null || true)
+    done < <(zfs get -H -r -s local,received -t snapshot -o name,value stevedore:unknown-since "${dest_base}/${tree_root}" 2>/dev/null || true)
     while IFS=$'\t' read -r full g; do
         if [[ -n "$full" && "$g" != "-" ]]; then
             dstamped[$full]=1
         fi
-    done < <(zfs get -H -r -s local,received -t filesystem,volume -o name,value zfsrecvd:orphan-since "${dest_base}/${tree_root}" 2>/dev/null || true)
+    done < <(zfs get -H -r -s local,received -t filesystem,volume -o name,value stevedore:orphan-since "${dest_base}/${tree_root}" 2>/dev/null || true)
     # dataset level: membership in the DS list alone (the manifest is
     # complete by contract §5, guid entries or not)
     for d in "${rds_order[@]}"; do
@@ -652,33 +652,33 @@ stamp_absent() {
         done
     done
     if [[ ${#dto_stamp[@]} -gt 0 ]]; then
-        if ! zfs set "zfsrecvd:orphan-since=$now" "${dto_stamp[@]}" 2>/dev/null; then
+        if ! zfs set "stevedore:orphan-since=$now" "${dto_stamp[@]}" 2>/dev/null; then
             for full in "${dto_stamp[@]}"; do
-                zfs set "zfsrecvd:orphan-since=$now" "$full" 2>/dev/null || true
+                zfs set "stevedore:orphan-since=$now" "$full" 2>/dev/null || true
             done
         fi
         log "stamped ${#dto_stamp[@]} manifest-absent dataset(s) orphan-since=$now"
     fi
     if [[ ${#dto_clear[@]} -gt 0 ]]; then
-        if ! zfs inherit zfsrecvd:orphan-since "${dto_clear[@]}" 2>/dev/null; then
+        if ! zfs inherit stevedore:orphan-since "${dto_clear[@]}" 2>/dev/null; then
             for full in "${dto_clear[@]}"; do
-                zfs inherit zfsrecvd:orphan-since "$full" 2>/dev/null || true
+                zfs inherit stevedore:orphan-since "$full" 2>/dev/null || true
             done
         fi
         log "cleared orphan-since on ${#dto_clear[@]} reappeared dataset(s)"
     fi
     if [[ ${#to_stamp[@]} -gt 0 ]]; then
-        if ! zfs set "zfsrecvd:unknown-since=$now" "${to_stamp[@]}" 2>/dev/null; then
+        if ! zfs set "stevedore:unknown-since=$now" "${to_stamp[@]}" 2>/dev/null; then
             for full in "${to_stamp[@]}"; do
-                zfs set "zfsrecvd:unknown-since=$now" "$full" 2>/dev/null || true
+                zfs set "stevedore:unknown-since=$now" "$full" 2>/dev/null || true
             done
         fi
         log "stamped ${#to_stamp[@]} receiver-only snapshot(s) unknown-since=$now"
     fi
     if [[ ${#to_clear[@]} -gt 0 ]]; then
-        if ! zfs inherit zfsrecvd:unknown-since "${to_clear[@]}" 2>/dev/null; then
+        if ! zfs inherit stevedore:unknown-since "${to_clear[@]}" 2>/dev/null; then
             for full in "${to_clear[@]}"; do
-                zfs inherit zfsrecvd:unknown-since "$full" 2>/dev/null || true
+                zfs inherit stevedore:unknown-since "$full" 2>/dev/null || true
             done
         fi
         log "cleared unknown-since on ${#to_clear[@]} reappeared snapshot(s)"
@@ -690,7 +690,7 @@ do_endtree() {
     stamp_absent
     if [[ ${#received[@]} -gt 0 ]]; then
         local stamp
-        stamp="zfsrecvd:last-recv=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        stamp="stevedore:last-recv=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         if ! zfs set "$stamp" "${received[@]}" 2>/dev/null; then
             local d
             for d in "${received[@]}"; do

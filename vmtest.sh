@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# zfsrecvd protocol 2.1 end-to-end test suite. Runs ON the test VM.
+# stevedore wire protocol 2.1 end-to-end test suite. Runs ON the test VM.
 # T1-T10 exercise the full transfer machinery; T8 hand-drives a raw
 # session; T9 proves non-2.x versions are rejected. T11+ are the 2.1
 # GUID features: unknown-since stamps, the base guid veto,
@@ -29,8 +29,8 @@ wait_zvol() {
 }
 
 echo "=== setup ==="
-sudo systemctl kill zfsrecvd-test 2>/dev/null
-sudo systemctl reset-failed zfsrecvd-test 2>/dev/null
+sudo systemctl kill stevedore-test 2>/dev/null
+sudo systemctl reset-failed stevedore-test 2>/dev/null
 sleep 0.5
 sudo zpool destroy ztest 2>/dev/null
 sudo rm -rf /dev/zvol/ztest 2>/dev/null   # stale regular-file junk from lost udev races
@@ -53,12 +53,12 @@ $CN
 [keep-count]
 6
 [prune-prefixes]
-zfsrecvd-
+stevedore-
 EOF
 
 sudo bash -c '
 cd /etc/stevedore
-openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.pem -days 2 -subj "/CN=zfsrecvd-test-ca" 2>/dev/null
+openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.pem -days 2 -subj "/CN=stevedore-test-ca" 2>/dev/null
 openssl req -newkey rsa:2048 -nodes -keyout server.key -out server.csr -subj "/CN=localhost" 2>/dev/null
 openssl x509 -req -in server.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 2 -out server.pem 2>/dev/null
 openssl req -newkey rsa:2048 -nodes -keyout client.key -out client.csr -subj "/CN='"$CN"'" 2>/dev/null
@@ -66,7 +66,7 @@ openssl x509 -req -in client.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 
 chmod 600 *.key
 '
 
-sudo systemd-run --unit=zfsrecvd-test /usr/local/lib/stevedore/stevedore-listen.sh >/dev/null 2>&1
+sudo systemd-run --unit=stevedore-test /usr/local/lib/stevedore/stevedore-listen.sh >/dev/null 2>&1
 sleep 1
 check "listener is up on 5299" bash -c 'ss -tln | grep -q :5299'
 
@@ -86,7 +86,7 @@ check "T1 exit 0" test "$rc" -eq 0
 check "T1 nested dataset arrived"  sudo zfs list -H "$DEST/a/deep@s1"
 check "T1 zvol arrived"            sudo zfs list -H "$DEST/vol@s1"
 check "T1 encrypted arrived raw"   bash -c "[ \"\$(sudo zfs get -H -o value encryption $DEST/enc)\" != off ]"
-check "T1 stamp present"           bash -c "[ \"\$(sudo zfs get -H -o value zfsrecvd:last-recv $DEST)\" != '-' ]"
+check "T1 stamp present"           bash -c "[ \"\$(sudo zfs get -H -o value stevedore:last-recv $DEST)\" != '-' ]"
 grep -q "14 sent" /tmp/t1.log && ok "T1 counted 14 sent" || { bad "T1 sent count"; cat /tmp/t1.log; }
 
 echo "=== T2: idempotent re-run, all up to date ==="
@@ -124,7 +124,7 @@ sudo zfs create -V 3G ztest/src/big
 wait_zvol /dev/zvol/ztest/src/big
 sudo dd if=/dev/urandom of=/dev/zvol/ztest/src/big bs=1M count=600 oflag=direct 2>/dev/null
 sudo zfs snapshot ztest/src/big@s4big
-sudo env ZFSRECVD_PV_EXTRA="-L 60M" /usr/local/lib/stevedore/stevedore-send.sh ztest/src/big@s4big localhost >/tmp/t5a.log 2>&1 &
+sudo env STEVEDORE_PV_EXTRA="-L 60M" /usr/local/lib/stevedore/stevedore-send.sh ztest/src/big@s4big localhost >/tmp/t5a.log 2>&1 &
 bg=$!
 for _ in $(seq 1 50); do pgrep -f 'zfs send -R ztest/src/big@s4big' >/dev/null && break; sleep 0.2; done
 sleep 1.5
@@ -147,7 +147,7 @@ check "T5 token cleared" test "$tok" = "-"
 echo "=== T6: unsatisfiable token gets ABORTed ==="
 sudo dd if=/dev/urandom of=/dev/zvol/ztest/src/big bs=1M count=400 seek=700 oflag=direct 2>/dev/null
 sudo zfs snapshot ztest/src/big@s5big
-sudo env ZFSRECVD_PV_EXTRA="-L 60M" /usr/local/lib/stevedore/stevedore-send.sh ztest/src/big@s5big localhost >/tmp/t6a.log 2>&1 &
+sudo env STEVEDORE_PV_EXTRA="-L 60M" /usr/local/lib/stevedore/stevedore-send.sh ztest/src/big@s5big localhost >/tmp/t6a.log 2>&1 &
 bg=$!
 for _ in $(seq 1 50); do pgrep -f 'zfs send.*ztest/src/big@s5big' >/dev/null && break; sleep 0.2; done
 sleep 1.5
@@ -165,13 +165,13 @@ grep -q "not satisfiable" /tmp/t6b.log && ok "T6 abort path taken" || { bad "T6 
 tok=$(sudo zfs get -H -o value receive_resume_token "$DEST/big" 2>/dev/null)
 check "T6 token cleared" test "$tok" = "-"
 
-echo "=== T7: pruning keeps 6 zfsrecvd-* snapshots each side ==="
+echo "=== T7: pruning keeps 6 stevedore-* snapshots each side ==="
 for i in 1 2 3 4 5 6 7 8; do
-    sudo zfs snapshot -r "ztest/src@zfsrecvd-2026-07-27-10${i}0Z"
+    sudo zfs snapshot -r "ztest/src@stevedore-2026-07-27-10${i}0Z"
     sudo /usr/local/lib/stevedore/stevedore-sendtree.sh ztest/src localhost >"/tmp/t7-$i.log" 2>&1 || bad "T7 run $i failed"
 done
-src_n=$(sudo zfs list -H -t snapshot -d 1 -o name ztest/src | grep -c '@zfsrecvd-')
-dst_n=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST" | grep -c '@zfsrecvd-')
+src_n=$(sudo zfs list -H -t snapshot -d 1 -o name ztest/src | grep -c '@stevedore-')
+dst_n=$(sudo zfs list -H -t snapshot -d 1 -o name "$DEST" | grep -c '@stevedore-')
 check "T7 source pruned to 6 (got $src_n)" test "$src_n" -eq 6
 check "T7 dest pruned to 6 (got $dst_n)" test "$dst_n" -eq 6
 check "T7 non-prefixed s1 survived on dest" sudo zfs list -H "$DEST@s1"
@@ -181,15 +181,15 @@ echo "=== T8: multi-TREE control session + refusal, hand-driven ==="
 # so the collision pass and snapshot clocks leave everything alone.
 # The DS list itself must be COMPLETE (§5 contract) -- dataset-absence
 # clocks key on membership, so a partial manifest would start them.
-{ printf 'zfsrecvd2.1\nTREE ztest/src zfsrecvd-2026-07-27-1080Z\n'
+{ printf 'stevedore2.1\nTREE ztest/src stevedore-2026-07-27-1080Z\n'
   sudo zfs list -H -r -t filesystem,volume -o name ztest/src | sed 's/^/DS /'
-  printf '\nSEND ztest/other - nope -\nENDTREE\nTREE ztest/src zfsrecvd-2026-07-27-1080Z\n'
+  printf '\nSEND ztest/other - nope -\nENDTREE\nTREE ztest/src stevedore-2026-07-27-1080Z\n'
   sudo zfs list -H -r -t filesystem,volume -o name ztest/src | sed 's/^/DS /'
   printf '\nENDTREE\nBYE\n'
   sleep 3; } \
     | sudo openssl s_client -connect localhost:5299 -CAfile /etc/stevedore/ca.pem \
         -cert /etc/stevedore/client.pem -key /etc/stevedore/client.key -quiet 2>/dev/null >/tmp/t8.log
-check "T8 greeting"        grep -q "OK zfsrecvd2.1" /tmp/t8.log
+check "T8 greeting"        grep -q "OK stevedore2.1" /tmp/t8.log
 check "T8 out-of-tree refused" grep -q "ERR refused ztest/other" /tmp/t8.log
 n_oktree=$(grep -c "OK TREE" /tmp/t8.log)
 n_okend=$(grep -c "OK ENDTREE" /tmp/t8.log)
@@ -214,17 +214,17 @@ echo "=== T11: receiver-only snapshots get unknown-since; reappearance clears ==
 # (a) a non-prefix snapshot that exists only on the receiver is stamped
 sudo zfs snapshot "$DEST/b@recvonly"
 # (b) a synced snapshot carrying a stale stamp is cleared (guid reappears)
-sudo zfs set zfsrecvd:unknown-since=2026-01-01T00:00:00Z "$DEST/b@s2"
+sudo zfs set stevedore:unknown-since=2026-01-01T00:00:00Z "$DEST/b@s2"
 sudo /usr/local/lib/stevedore/stevedore-sendtree.sh ztest/src localhost >/tmp/t11.log 2>&1
 rc=$?
 check "T11 exit 0" test "$rc" -eq 0
-us=$(sudo zfs get -H -s local -o value zfsrecvd:unknown-since "$DEST/b@recvonly" 2>/dev/null)
+us=$(sudo zfs get -H -s local -o value stevedore:unknown-since "$DEST/b@recvonly" 2>/dev/null)
 if [ -n "$us" ] && [ "$us" != "-" ]; then ok "T11 receiver-only snap stamped ($us)"; else bad "T11 stamp missing (got '$us')"; fi
-us2=$(sudo zfs get -H -s local -o value zfsrecvd:unknown-since "$DEST/b@s2" 2>/dev/null)
+us2=$(sudo zfs get -H -s local -o value stevedore:unknown-since "$DEST/b@s2" 2>/dev/null)
 if [ -z "$us2" ] || [ "$us2" = "-" ]; then ok "T11 reappeared snap cleared"; else bad "T11 stale stamp survived ($us2)"; fi
 grep -q "receiver-only snapshots" /tmp/t11.log && bad "T11 retired NOTE still prints" || ok "T11 NOTE retired (stamps track it now)"
 # prefix snaps are the grid's business: none may carry a stamp
-pn=$(sudo zfs get -H -r -s local -t snapshot -o name,value zfsrecvd:unknown-since "$DEST" | grep -c "@zfsrecvd-") || pn=0
+pn=$(sudo zfs get -H -r -s local -t snapshot -o name,value stevedore:unknown-since "$DEST" | grep -c "@stevedore-") || pn=0
 check "T11 no prefix snap stamped (got $pn)" test "$pn" -eq 0
 
 echo "=== T12: snapshot name reuse -> guid veto -> replanned base ==="
@@ -294,32 +294,32 @@ echo "=== T16: manifest-driven orphan clocks + received-source stamps ==="
 # the .gone trees from T12/T13 are absent from every manifest; T15's
 # whole-tree run must have started their clocks
 gds=$(sudo zfs list -H -o name | grep "^$DEST/d\.gone-" | head -n 1)
-os=$(sudo zfs get -H -s local -o value zfsrecvd:orphan-since "$gds" 2>/dev/null)
+os=$(sudo zfs get -H -s local -o value stevedore:orphan-since "$gds" 2>/dev/null)
 if [ -n "$os" ] && [ "$os" != "-" ]; then ok "T16 renamed-aside tree clocked"; else bad "T16 .gone unclocked (got '$os')"; fi
 # reappearance clears: stamp a live dataset, run, the clock must be gone
-sudo zfs set zfsrecvd:orphan-since=2026-01-01T00:00:00Z "$DEST/b"
+sudo zfs set stevedore:orphan-since=2026-01-01T00:00:00Z "$DEST/b"
 sudo /usr/local/lib/stevedore/stevedore-sendtree.sh ztest/src localhost >/tmp/t16.log 2>&1 || bad "T16 run failed"
-os2=$(sudo zfs get -H -s local,received -o value zfsrecvd:orphan-since "$DEST/b" 2>/dev/null)
+os2=$(sudo zfs get -H -s local,received -o value stevedore:orphan-since "$DEST/b" 2>/dev/null)
 if [ -z "$os2" ] || [ "$os2" = "-" ]; then ok "T16 reappearance cleared the clock"; else bad "T16 clock survived ($os2)"; fi
 # received-source mechanics (§17 corollary): a stamp that crossed a
 # send/recv reads as source=received and must still count -- and plain
 # `zfs inherit` must clear it, not resurrect it
 sudo zfs create ztest/rcvsrc
-sudo zfs set zfsrecvd:orphan-since=2026-02-02T00:00:00Z ztest/rcvsrc
+sudo zfs set stevedore:orphan-since=2026-02-02T00:00:00Z ztest/rcvsrc
 sudo zfs snapshot ztest/rcvsrc@p
 sudo sh -c 'zfs send -p ztest/rcvsrc@p | zfs recv ztest/rcvdst'
-rsrc=$(sudo zfs get -H -o source zfsrecvd:orphan-since ztest/rcvdst)
+rsrc=$(sudo zfs get -H -o source stevedore:orphan-since ztest/rcvdst)
 check "T16 stamp crossed as received (got $rsrc)" test "$rsrc" = "received"
-rv=$(sudo zfs get -H -s local,received -o value zfsrecvd:orphan-since ztest/rcvdst)
+rv=$(sudo zfs get -H -s local,received -o value stevedore:orphan-since ztest/rcvdst)
 check "T16 received stamp readable via -s local,received" test "$rv" = "2026-02-02T00:00:00Z"
-sudo zfs inherit zfsrecvd:orphan-since ztest/rcvdst
-rv2=$(sudo zfs get -H -s local,received -o value zfsrecvd:orphan-since ztest/rcvdst 2>/dev/null)
+sudo zfs inherit stevedore:orphan-since ztest/rcvdst
+rv2=$(sudo zfs get -H -s local,received -o value stevedore:orphan-since ztest/rcvdst 2>/dev/null)
 if [ -z "$rv2" ] || [ "$rv2" = "-" ]; then ok "T16 inherit clears received (no resurrection)"; else bad "T16 inherit left '$rv2'"; fi
 
 echo
 echo "=== RESULT: $PASS passed, $FAIL failed ==="
 if [ "$FAIL" -gt 0 ]; then
     echo "--- listener journal tail ---"
-    sudo journalctl -u zfsrecvd-test -n 40 --no-pager 2>/dev/null | tail -n 40
+    sudo journalctl -u stevedore-test -n 40 --no-pager 2>/dev/null | tail -n 40
     exit 1
 fi

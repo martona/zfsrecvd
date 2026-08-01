@@ -26,11 +26,11 @@ source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/stevedore-cfgparser.sh"
 # Env-overridable so the machinery can be WATCHED without waiting months
 # -- safe to turn all the way down precisely because this build cannot
 # destroy anything:
-#   sudo env ZFSRECVD_GC_WARN_DAYS=0 ZFSRECVD_GC_GRACE_DAYS=0 \
-#       ZFSRECVD_CONF=/run/stevedore/<id>/run.conf \
+#   sudo env STEVEDORE_GC_WARN_DAYS=0 STEVEDORE_GC_GRACE_DAYS=0 \
+#       STEVEDORE_CONF=/run/stevedore/<id>/run.conf \
 #       /usr/local/lib/stevedore/stevedore-gc.sh
-WARN_DAYS="${ZFSRECVD_GC_WARN_DAYS:-60}"    # stamp -> console warnings
-GRACE_DAYS="${ZFSRECVD_GC_GRACE_DAYS:-90}"  # stamp -> reclaim-eligible
+WARN_DAYS="${STEVEDORE_GC_WARN_DAYS:-60}"    # stamp -> console warnings
+GRACE_DAYS="${STEVEDORE_GC_GRACE_DAYS:-90}"  # stamp -> reclaim-eligible
 
 now=$(date -u +%s)
 say() { echo "GC:   $*"; }
@@ -68,15 +68,15 @@ while IFS= read -r cnroot; do
         # stamps (received = per-dataset, survives pool migrations --
         # §17 corollary); inherited values are nothing.
         [[ "$src" == "local" || "$src" == "received" ]] || continue
-        if [[ "$prop" == "zfsrecvd:last-recv" && "$val" != "-" ]]; then
+        if [[ "$prop" == "stevedore:last-recv" && "$val" != "-" ]]; then
             e=$(date -u -d "$val" +%s 2>/dev/null) || e=0
             lr[$ds]=$e
             (( e > newest )) && newest=$e
-        elif [[ "$prop" == "zfsrecvd:orphan-since" && "$val" != "-" ]]; then
+        elif [[ "$prop" == "stevedore:orphan-since" && "$val" != "-" ]]; then
             osince[$ds]="$val"
         fi
     done < <(zfs get -H -r -t filesystem,volume \
-        -o name,property,value,source zfsrecvd:last-recv,zfsrecvd:orphan-since \
+        -o name,property,value,source stevedore:last-recv,stevedore:orphan-since \
         "$cnroot" 2>/dev/null)
 
     if (( newest == 0 )); then
@@ -98,7 +98,7 @@ while IFS= read -r cnroot; do
             done
             if [[ -z "$has_stamped_child" ]]; then
                 n_unst=$(( n_unst + 1 ))
-                say "$ds: UNSTAMPED -- never received under zfsrecvd"
+                say "$ds: UNSTAMPED -- never received under stevedore"
             fi
             continue
         fi
@@ -141,7 +141,7 @@ while IFS= read -r cnroot; do
         else
             track "$sn: unknown-since $val; eligible in ${uleft}d"
         fi
-    done < <(zfs get -H -r -s local,received -t snapshot -o name,value zfsrecvd:unknown-since "$cnroot" 2>/dev/null || true)
+    done < <(zfs get -H -r -s local,received -t snapshot -o name,value stevedore:unknown-since "$cnroot" 2>/dev/null || true)
 
     # client summary: per-CN line only when there is something WARNED
     # about (owner: all-zero lines "elevate to noise", and un-warned

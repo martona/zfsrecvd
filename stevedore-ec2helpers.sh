@@ -30,10 +30,10 @@ ssh_opts=( -o ConnectTimeout=10 -o BatchMode=yes
 orch_lock() {
     # fleetrun.sh holds the estate lock itself and runs orchestrate.sh as a
     # child; the child must not contend with its parent.
-    if [[ -n "${ZFSRECVD_SKIP_LOCK:-}" ]]; then
+    if [[ -n "${STEVEDORE_SKIP_LOCK:-}" ]]; then
         return 0
     fi
-    local lock_file="${ZFSRECVD_LOCK_FILE:-/run/lock/stevedore-orchestrate.lock}"
+    local lock_file="${STEVEDORE_LOCK_FILE:-/run/lock/stevedore-orchestrate.lock}"
     # Probe with a normal redirection first: a failed exec redirection would
     # abort the script with a bare "Permission denied" instead of this hint.
     if ! : 2>/dev/null >> "$lock_file"; then

@@ -103,7 +103,7 @@ QUIET=""                                 # live board: defer per-job messages
 
 # One snapshot name for the whole run, every source, every tree -- same
 # format sendall used, so the prune prefix and existing tooling all match.
-snap="zfsrecvd-$(date -u +%Y-%m-%d-%H%MZ)"
+snap="stevedore-$(date -u +%Y-%m-%d-%H%MZ)"
 
 job_label() {   # $1 = job index -> "[src] tree -> [dst]"
     printf '[%s] %s -> [%s]' "${J_SRC[$1]}" "${J_TREE[$1]}" "${J_DST[$1]}"
@@ -112,14 +112,14 @@ job_label() {   # $1 = job index -> "[src] tree -> [dst]"
 # The remote command for one job. run_indented is a sourced function, not
 # an executable, hence the bash -c wrapper; the prefix names both ends so
 # nothing downstream tags the stream again. $2 is extra env for the
-# sudo env invocation (" ZFSRECVD_COLS=N" under the live board).
+# sudo env invocation (" STEVEDORE_COLS=N" under the live board).
 # The [ -t 2 ] probe MUST happen here, before run_indented wraps stderr
 # in the gawk pipe: cfgparser's own tty check runs inside that pipe and
 # would never see the pty, so pv would stay silent for the whole run
 # (sendall used to probe at the right moment; found on the first real T
 # run when three massive sends showed no progress at all).
 job_cmd() {
-    printf "sudo -n env ZFSRECVD_CONF=%s ZFSRECVD_DEST_ID=%s%s bash -c '[ -t 2 ] && export PV_FORCE_FLAG=-f; source ${STEVE_LIB}/stevedore-run-indented.sh; run_indented \"[%s]>[%s] \" ${STEVE_LIB}/stevedore-sendtree.sh --no-prune %s@%s %s'" \
+    printf "sudo -n env STEVEDORE_CONF=%s STEVEDORE_DEST_ID=%s%s bash -c '[ -t 2 ] && export PV_FORCE_FLAG=-f; source ${STEVE_LIB}/stevedore-run-indented.sh; run_indented \"[%s]>[%s] \" ${STEVE_LIB}/stevedore-sendtree.sh --no-prune %s@%s %s'" \
         "${J_RCONF[$1]}" "${J_DST[$1]}" "$2" "${J_SRC[$1]}" "${J_DST[$1]}" \
         "${J_TREE[$1]}" "$snap" "${J_DIAL[$1]}"
 }
@@ -258,7 +258,7 @@ done
 # One engine for both parallel modes. Live: per-job logs, one repainted
 # board line per WORKER, remote pty pinned to a width frozen once per run
 # (clamped to 132 so the logs stay readable in narrower viewers later;
-# ZFSRECVD_COLS overrides). Plain: raw line-interleaved output, each line
+# STEVEDORE_COLS overrides). Plain: raw line-interleaved output, each line
 # already prefixed remotely.
 run_pool() {   # $1 = live | plain
     local mode="$1" w i rc running pending content
@@ -272,7 +272,7 @@ run_pool() {   # $1 = live | plain
         logdir=$(mktemp -d /tmp/stevedore-orch.XXXXXX)
         cols=$(tput cols 2>/dev/null) || cols=120
         prev_cols=$cols
-        local wire_cols="${ZFSRECVD_COLS:-$(( cols < 132 ? cols : 132 ))}"
+        local wire_cols="${STEVEDORE_COLS:-$(( cols < 132 ? cols : 132 ))}"
         remote_cols=$(( wire_cols > 40 ? wire_cols - 2 : wire_cols ))
         echo "fan-out: $njobs jobs across $workers workers (logs: $logdir)" >&2
         for (( w = 0; w < workers; w++ )); do printf '\n' >&2; done
@@ -304,7 +304,7 @@ run_pool() {   # $1 = live | plain
             mark_running "$i"
             if [[ "$mode" == "live" ]]; then
                 ssh -tt "${ssh_opts[@]}" "${J_SSH[i]}" \
-                    "stty cols $remote_cols 2>/dev/null || true; exec $(job_cmd "$i" " ZFSRECVD_COLS=$remote_cols")" \
+                    "stty cols $remote_cols 2>/dev/null || true; exec $(job_cmd "$i" " STEVEDORE_COLS=$remote_cols")" \
                     </dev/null >"$(job_log "$i")" 2>&1 &
             else
                 echo "job start: $(job_label "$i")" >&2
@@ -438,15 +438,15 @@ for key in "${pp_keys[@]}"; do
     # whatever captures the run -- a cron unit's journal, a redirect --
     # has them. Live board: the screen stays clean and the lines go
     # nowhere; the result is inspectable on the source itself.
-    # ZFSRECVD_SHOW_PRUNES=1 promotes them to the board runs too.
-    if [[ -n "$QUIET" && -z "${ZFSRECVD_SHOW_PRUNES:-}" ]]; then
+    # STEVEDORE_SHOW_PRUNES=1 promotes them to the board runs too.
+    if [[ -n "$QUIET" && -z "${STEVEDORE_SHOW_PRUNES:-}" ]]; then
         ssh "${ssh_opts[@]}" "${J_SSH[i]}" \
-            "sudo -n env ZFSRECVD_CONF=${J_RCONF[i]} $STEVE_LIB/stevedore-sendtree.sh --prune-only ${J_TREE[i]}" \
+            "sudo -n env STEVEDORE_CONF=${J_RCONF[i]} $STEVE_LIB/stevedore-sendtree.sh --prune-only ${J_TREE[i]}" \
             </dev/null >/dev/null 2>&1 \
             || echo "WARNING: prune-post failed for [${J_TREE[i]}] on [${J_SRC[i]}]" >&2
     else
         ssh "${ssh_opts[@]}" "${J_SSH[i]}" \
-            "sudo -n env ZFSRECVD_CONF=${J_RCONF[i]} bash -c 'source $STEVE_LIB/stevedore-run-indented.sh; run_indented \"[${J_SRC[i]}] \" $STEVE_LIB/stevedore-sendtree.sh --prune-only ${J_TREE[i]}'" \
+            "sudo -n env STEVEDORE_CONF=${J_RCONF[i]} bash -c 'source $STEVE_LIB/stevedore-run-indented.sh; run_indented \"[${J_SRC[i]}] \" $STEVE_LIB/stevedore-sendtree.sh --prune-only ${J_TREE[i]}'" \
             </dev/null \
             || echo "WARNING: prune-post failed for [${J_TREE[i]}] on [${J_SRC[i]}]" >&2
     fi

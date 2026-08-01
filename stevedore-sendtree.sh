@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# zfsrecvd protocol 2.1 sender: replicates a dataset tree over one TLS
+# stevedore wire protocol 2.1 sender: replicates a dataset tree over one TLS
 # session. See PROTOCOL.md for the wire contract. 2.1 only (manifest
 # snapshot+cursor guids, guid-veto replanning, received-bytes); a peer
 # greeting anything else is a config error and fails clean.
@@ -38,23 +38,23 @@ set -f                       # never glob; plenty of protocol word-splitting
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/stevedore-cfgparser.sh"
 
 # When we run under run_indented (see orchestrate.sh), every line we emit grows
-# by ZFSRECVD_INDENT columns of prefix before reaching the terminal. pv sizes
+# by STEVEDORE_INDENT columns of prefix before reaching the terminal. pv sizes
 # its progress line to the terminal width (or assumes 80 when it can't tell),
 # so an unshrunk line wraps once prefixed, and every \r-refresh then lands on
 # a fresh row instead of overwriting in place. Shrink pv to compensate.
 PV_WIDTH_FLAG=""
-if [[ "${ZFSRECVD_INDENT:-0}" -gt 0 ]]; then
-    # Width source, in order: ZFSRECVD_COLS (frozen once at orchestrate
+if [[ "${STEVEDORE_INDENT:-0}" -gt 0 ]]; then
+    # Width source, in order: STEVEDORE_COLS (frozen once at orchestrate
     # startup -- stable against mid-run resizes), else a live
     # probe of the controlling tty. In the probe, 2>/dev/null must come
     # FIRST: redirections apply left to right, and a failed /dev/tty open
     # reports to whatever stderr is at that moment.
-    cols="${ZFSRECVD_COLS:-}"
+    cols="${STEVEDORE_COLS:-}"
     if [[ -z "$cols" ]]; then
         cols=$(stty size 2>/dev/null </dev/tty | awk '{print $2}') || true
     fi
-    if [[ -n "${cols:-}" && "$cols" -gt $(( ${ZFSRECVD_INDENT:-0} + 20 )) ]]; then
-        PV_WIDTH_FLAG="-w $(( cols - ${ZFSRECVD_INDENT:-0} - 1 ))"
+    if [[ -n "${cols:-}" && "$cols" -gt $(( ${STEVEDORE_INDENT:-0} + 20 )) ]]; then
+        PV_WIDTH_FLAG="-w $(( cols - ${STEVEDORE_INDENT:-0} - 1 ))"
     fi
 fi
 
@@ -157,15 +157,15 @@ fi
 # Under run_indented the line prefix already names both ends; on a bare
 # manual run there is no prefix, so announce lines append the destination.
 dest_tag=""
-if [[ "${ZFSRECVD_INDENT:-0}" -eq 0 ]]; then
+if [[ "${STEVEDORE_INDENT:-0}" -eq 0 ]]; then
     dest_tag=" -> [${remote}]"
 fi
 
 # Cursor identity (PROTOCOL.md §22): bookmarks are keyed by destination
 # IDENTITY, never the dial name (dials get renamed; identities don't).
-# Orchestrated jobs pass it via ZFSRECVD_DEST_ID; manual runs fall back
+# Orchestrated jobs pass it via STEVEDORE_DEST_ID; manual runs fall back
 # to the remote argument.
-dest_id="${ZFSRECVD_DEST_ID:-$remote}"
+dest_id="${STEVEDORE_DEST_ID:-$remote}"
 dest_id="${dest_id//[^A-Za-z0-9._-]/_}"
 
 #
@@ -203,7 +203,7 @@ while IFS=$'\t' read -r s gd; do
     lpairs[$ds]="${lpairs[$ds]:-}${lpairs[$ds]:+,}$sn:$gd"
 done < <(zfs list -H -r -t snapshot -s creation -o name,guid "$root")
 
-# Replication cursors as manifest entries (2.1): every zfsrecvd-* bookmark
+# Replication cursors as manifest entries (2.1): every stevedore-* bookmark
 # regardless of destination -- each one is lineage evidence for the
 # server's collision pass ("this guid was in my history"), and more
 # evidence means fewer false rename-asides. A bookmark's guid is its
@@ -211,7 +211,7 @@ done < <(zfs list -H -r -t snapshot -s creation -o name,guid "$root")
 # tree (zero snapshot overlap, live cursor) distinguishable from a
 # recreated-under-the-same-name tree (zero overlap, no cursor).
 while IFS=$'\t' read -r b gd; do
-    [[ "$b" == *#zfsrecvd-* ]] || continue
+    [[ "$b" == *#stevedore-* ]] || continue
     ds="${b%%#*}"
     bpairs[$ds]="${bpairs[$ds]:-}${bpairs[$ds]:+,}#${b#*#}:$gd"
 done < <(zfs list -H -r -t bookmark -o name,guid "$root" 2>/dev/null || true)
@@ -281,21 +281,21 @@ fi
 
 # Replication cursors (PROTOCOL.md §22 -- zrepl's pattern): ONE bookmark
 # per (dataset, destination) naming the newest snapshot that destination
-# CONFIRMED holding: ds#zfsrecvd-<dest-id>-<snapname>. Bookmarks pin no
+# CONFIRMED holding: ds#stevedore-<dest-id>-<snapname>. Bookmarks pin no
 # blocks, so local thinning can outrun every destination and an
 # incremental from the cursor's GUID still works. Advance = create the
 # new cursor, then destroy the OLDER ones for the pair; a crash between
 # the two leaves both and the next advance cleans up.
 cursor_list() {   # $1 = ds -> this pair's cursor bookmark names
     zfs list -H -t bookmark -d 1 -o name "$1" 2>/dev/null \
-        | grep -F "#zfsrecvd-${dest_id}-" || true
+        | grep -F "#stevedore-${dest_id}-" || true
 }
 advance_cursor() {   # $1 = ds, $2 = confirmed snapname
-    local bm="${1}#zfsrecvd-${dest_id}-${2}" old osnap
+    local bm="${1}#stevedore-${dest_id}-${2}" old osnap
     zfs bookmark "${1}@${2}" "$bm" 2>/dev/null || true
     while IFS= read -r old; do
         [[ -n "$old" && "$old" != "$bm" ]] || continue
-        osnap="${old#*"#zfsrecvd-${dest_id}-"}"
+        osnap="${old#*"#stevedore-${dest_id}-"}"
         if [[ "$osnap" < "$2" ]]; then
             zfs destroy "$old" 2>/dev/null || true
         fi
@@ -307,7 +307,7 @@ cursor_base() {   # $1 = ds -> snapname or ""
     local bm snap best=""
     while IFS= read -r bm; do
         [[ -n "$bm" ]] || continue
-        snap="${bm#*"#zfsrecvd-${dest_id}-"}"
+        snap="${bm#*"#stevedore-${dest_id}-"}"
         [[ ",${have[$1]:-}," == *",$snap,"* ]] || continue
         if [[ -z "$best" || "$snap" > "$best" ]]; then
             best="$snap"
@@ -370,15 +370,15 @@ connect_session() {
         exec {OUT}>&"${NET[1]}"
         exec {IN}<&"${NET[0]}"
     fi
-    printf 'zfsrecvd2.1\n' >&"$OUT" 2>/dev/null || { close_session; return 1; }
+    printf 'stevedore2.1\n' >&"$OUT" 2>/dev/null || { close_session; return 1; }
     local g
     IFS= read -r -t 15 -u "$IN" g || { close_session; return 1; }
-    if [[ "$g" != "OK zfsrecvd2.1" ]]; then
+    if [[ "$g" != "OK stevedore2.1" ]]; then
         echo "ERROR: unexpected greeting from [$remote]: $g" >&2
         close_session
         return 1
     fi
-    echo "connected to [$remote] (zfsrecvd2.1${tunnel_port[$remote]:+, haproxy tunnel})" >&2
+    echo "connected to [$remote] (stevedore2.1${tunnel_port[$remote]:+, haproxy tunnel})" >&2
     return 0
 }
 
@@ -454,11 +454,11 @@ xfer() {
     if [[ "$est" =~ ^[0-9]+$ ]]; then
         est_pv="$est"
     fi
-    # ZFSRECVD_PV_EXTRA: optional extra pv flags from the environment, e.g.
-    # ZFSRECVD_PV_EXTRA="-L 50M" to cap bandwidth for a manual run.
+    # STEVEDORE_PV_EXTRA: optional extra pv flags from the environment, e.g.
+    # STEVEDORE_PV_EXTRA="-L 50M" to cap bandwidth for a manual run.
     local rc pvrc ps=()
     set +e
-    zfs send "$@" | pv $PV_FORCE_FLAG $PV_WIDTH_FLAG ${ZFSRECVD_PV_EXTRA:-} ${est_pv:+-s "$est_pv"} >&"$OUT"
+    zfs send "$@" | pv $PV_FORCE_FLAG $PV_WIDTH_FLAG ${STEVEDORE_PV_EXTRA:-} ${est_pv:+-s "$est_pv"} >&"$OUT"
     ps=( "${PIPESTATUS[@]}" )   # copy in one statement; any command resets it
     set -e
     rc=${ps[0]}
@@ -610,9 +610,9 @@ plan_one() {
     if [[ -n "$cbase" ]]; then
         cflags="$flags"
         [[ "$cflags" == "-R" ]] && cflags=""
-        est=$(estimate $cflags -i "${ds}#zfsrecvd-${dest_id}-${cbase}" "${ds}@${target}")
+        est=$(estimate $cflags -i "${ds}#stevedore-${dest_id}-${cbase}" "${ds}@${target}")
         xfer "${ds}@${cbase} (cursor catch-up)${dest_tag}" "$est" "SEND $ds $cbase $target $est" \
-            $cflags -i "${ds}#zfsrecvd-${dest_id}-${cbase}" "${ds}@${target}"
+            $cflags -i "${ds}#stevedore-${dest_id}-${cbase}" "${ds}@${target}"
         rc=$?
         if [[ $rc -eq 1 && "$LAST_REFUSAL" == *guid-mismatch* ]]; then
             # The receiver's @cbase is not the snapshot our cursor points

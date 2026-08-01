@@ -16,10 +16,10 @@
 #      hosts and never transit; validity is a constant 365 days -- the
 #      revocation story is CA abandonment at teardown, not expiry),
 #   3. generates per-host run configs (the CLASSIC format, consumed via
-#      the ZFSRECVD_CONF override -- sendtree/listen are unchanged),
+#      the STEVEDORE_CONF override -- sendtree/listen are unchanged),
 #   4. ships bundles to /run/stevedore/ on every participant (tmpfs: a
 #      reboot vaporizes the trust material and the listener together),
-#   5. starts an ephemeral listener (systemd-run unit "zfsrecvd-run") on
+#   5. starts an ephemeral listener (systemd-run unit "stevedore-run") on
 #      every receiver, bound to the run CA,
 #   6. executes the run through the orchestrator's worker pool: one job
 #      per (source, tree, destination) row, scheduled per PROTOCOL.md §19,
@@ -339,9 +339,9 @@ if [[ -n "$check_only" ]]; then
 fi
 
 # One orchestrate/deploy/fleetrun at a time across the estate; the child
-# orchestrate skips the lock via ZFSRECVD_SKIP_LOCK.
+# orchestrate skips the lock via STEVEDORE_SKIP_LOCK.
 orch_lock
-export ZFSRECVD_SKIP_LOCK=1
+export STEVEDORE_SKIP_LOCK=1
 
 if (( ${#fleet_job_src[@]} == 0 )); then
     # every job policy-skipped: a successful no-op, not a degraded run.
@@ -411,12 +411,12 @@ fleet_teardown() {
     local h dest
     for h in "${ha_started[@]}"; do
         dest=$(fleet_ssh_dest "$h")
-        fleet_ssh "$dest" "sudo -n systemctl stop zfsrecvd-ha-$h 2>/dev/null; sudo -n systemctl reset-failed zfsrecvd-ha-$h 2>/dev/null; ! systemctl is-active --quiet zfsrecvd-ha-$h" \
+        fleet_ssh "$dest" "sudo -n systemctl stop stevedore-ha-$h 2>/dev/null; sudo -n systemctl reset-failed stevedore-ha-$h 2>/dev/null; ! systemctl is-active --quiet stevedore-ha-$h" \
             </dev/null || echo "WARNING: haproxy unit still active on [$h]" >&2
     done
     for h in "${listeners[@]}"; do
         dest=$(fleet_ssh_dest "$h")
-        fleet_ssh "$dest" "sudo -n systemctl stop zfsrecvd-run-$h 2>/dev/null; sudo -n systemctl reset-failed zfsrecvd-run-$h 2>/dev/null; ! systemctl is-active --quiet zfsrecvd-run-$h" \
+        fleet_ssh "$dest" "sudo -n systemctl stop stevedore-run-$h 2>/dev/null; sudo -n systemctl reset-failed stevedore-run-$h 2>/dev/null; ! systemctl is-active --quiet stevedore-run-$h" \
             </dev/null || echo "WARNING: run listener still active on [$h]" >&2
     done
     # prov_failed hosts too: a mid-provision failure can leave a partial
@@ -448,7 +448,7 @@ trap 'fleet_teardown; stop_ec2_instances' EXIT
 #
 openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
     -keyout "$rundir/ca.key" -out "$rundir/ca.pem" \
-    -subj "/CN=zfsrecvd-$run_id-ca" 2>/dev/null
+    -subj "/CN=stevedore-$run_id-ca" 2>/dev/null
 echo "minted run CA ($run_id, validity 365d)" >&2
 
 #
@@ -484,7 +484,7 @@ gen_run_conf() {   # $1 = host identity -> writes $rundir/bundle-$1/run.conf
             printf '[tcp-port]\n%s\n' "$fleet_opt_port"
         fi
         printf '[keep-count]\n%s\n' "$kc"
-        printf '[prune-prefixes]\nzfsrecvd-\n'
+        printf '[prune-prefixes]\nstevedore-\n'
         # No [sends] since T: the orchestrator drives sendtree per job row
         # (PROTOCOL.md §19); this conf carries host-scoped settings only.
         local i d
@@ -600,7 +600,7 @@ provision_host() {   # $1 = host identity
 start_listener() {   # $1 = receiver identity
     local id="$1" dest unit bindpat
     dest=$(fleet_ssh_dest "$id")
-    unit="zfsrecvd-run-$id"
+    unit="stevedore-run-$id"
     # Verify the bind by address when one is configured: two receiver
     # identities can share a box on different addresses of the same port,
     # and a bare :port match would credit one listener with the other's
@@ -613,7 +613,7 @@ start_listener() {   # $1 = receiver identity
         bindpat="${fleet_host_bind[$id]}:$fleet_opt_port "
     fi
     echo "starting run listener on [$id] (port $fleet_opt_port)" >&2
-    fleet_ssh "$dest" "sudo -n systemctl stop $unit 2>/dev/null; sudo -n systemctl reset-failed $unit 2>/dev/null; sudo -n systemd-run --unit=$unit --setenv=ZFSRECVD_CONF=$RUN_REMOTE_BASE/$id/run.conf $STEVE_LIB/stevedore-listen.sh >/dev/null 2>&1; for i in \$(seq 1 40); do ss -tln | grep -qF '$bindpat' && exit 0; sleep 0.25; done; echo 'run listener failed to bind:' >&2; sudo -n journalctl -u $unit -n 10 --no-pager >&2; exit 1" \
+    fleet_ssh "$dest" "sudo -n systemctl stop $unit 2>/dev/null; sudo -n systemctl reset-failed $unit 2>/dev/null; sudo -n systemd-run --unit=$unit --setenv=STEVEDORE_CONF=$RUN_REMOTE_BASE/$id/run.conf $STEVE_LIB/stevedore-listen.sh >/dev/null 2>&1; for i in \$(seq 1 40); do ss -tln | grep -qF '$bindpat' && exit 0; sleep 0.25; done; echo 'run listener failed to bind:' >&2; sudo -n journalctl -u $unit -n 10 --no-pager >&2; exit 1" \
         </dev/null || return 1
     listeners+=( "$id" )
 }
@@ -657,7 +657,7 @@ gen_haproxy_cfg() {   # $1 = identity -> writes $rundir/bundle-$1/haproxy.cfg
 start_haproxy() {   # $1 = participant identity
     local id="$1" dest unit rdir pat i
     dest=$(fleet_ssh_dest "$id")
-    unit="zfsrecvd-ha-$id"
+    unit="stevedore-ha-$id"
     rdir="$RUN_REMOTE_BASE/$id"
     # bind-verify pattern: receivers bind their public TLS port; a
     # sender-only box binds its first tunnel frontend on loopback
@@ -759,7 +759,7 @@ fi
 
 echo "executing run $run_id" >&2
 set +e
-ZFSRECVD_CONF="$rundir/orchestrator.conf" \
+STEVEDORE_CONF="$rundir/orchestrator.conf" \
     "$here/stevedore-orchestrate.sh" "${orch_args[@]}"
 orch_rc=$?
 set -e
@@ -775,11 +775,11 @@ fi
 # way to use them is on the fleetrun command line, and env does not
 # cross ssh by itself (bit the owner's first grace-knob experiment).
 gcenv=""
-if [[ "${ZFSRECVD_GC_WARN_DAYS:-}" =~ ^[0-9]+$ ]]; then
-    gcenv+=" ZFSRECVD_GC_WARN_DAYS=${ZFSRECVD_GC_WARN_DAYS}"
+if [[ "${STEVEDORE_GC_WARN_DAYS:-}" =~ ^[0-9]+$ ]]; then
+    gcenv+=" STEVEDORE_GC_WARN_DAYS=${STEVEDORE_GC_WARN_DAYS}"
 fi
-if [[ "${ZFSRECVD_GC_GRACE_DAYS:-}" =~ ^[0-9]+$ ]]; then
-    gcenv+=" ZFSRECVD_GC_GRACE_DAYS=${ZFSRECVD_GC_GRACE_DAYS}"
+if [[ "${STEVEDORE_GC_GRACE_DAYS:-}" =~ ^[0-9]+$ ]]; then
+    gcenv+=" STEVEDORE_GC_GRACE_DAYS=${STEVEDORE_GC_GRACE_DAYS}"
 fi
 gc_json=""
 for h in "${fleet_receivers[@]}"; do
@@ -791,7 +791,7 @@ for h in "${fleet_receivers[@]}"; do
     # re-echoed verbatim -- the console keeps every line in every mode
     gout=""
     if ! gout=$(fleet_ssh "$(fleet_ssh_dest "$h")" \
-        "sudo -n env ZFSRECVD_CONF=$RUN_REMOTE_BASE/$h/run.conf$gcenv $STEVE_LIB/stevedore-gc.sh" \
+        "sudo -n env STEVEDORE_CONF=$RUN_REMOTE_BASE/$h/run.conf$gcenv $STEVE_LIB/stevedore-gc.sh" \
         </dev/null); then
         echo "WARNING: gc pass failed on [$h]" >&2
     fi
@@ -837,10 +837,10 @@ for h in "${fleet_receivers[@]}"; do
         # numbers land in the jsonl record only; report.sh renders them
         # (owner 2026-07-30: the console report: lines were redundant)
         report_json="${report_json}${report_json:+,}{\"id\":\"$h\",\"before\":$r_before,\"after\":$r_used,\"avail\":${r_avail:-0},\"pruned\":$r_pruned}"
-        # ZFSRECVD_SHOW_PRUNES=1: name every snapshot this run destroyed
+        # STEVEDORE_SHOW_PRUNES=1: name every snapshot this run destroyed
         # on the receiver (owner: watch the thinning while trust in it
         # builds). The ledger exists regardless; only display is gated.
-        if [[ -n "${ZFSRECVD_SHOW_PRUNES:-}" ]]; then
+        if [[ -n "${STEVEDORE_SHOW_PRUNES:-}" ]]; then
             fleet_ssh "$(fleet_ssh_dest "$h")" \
                 "sudo -n cat $RUN_REMOTE_BASE/$h/pruned.list 2>/dev/null || true" \
                 </dev/null 2>/dev/null | sed "s/^/  pruned: [$h] /" >&2 || true
