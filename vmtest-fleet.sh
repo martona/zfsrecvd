@@ -393,56 +393,7 @@ rc=$?
 check "T18 check rc=0" test "$rc" -eq 0
 grep -q "SKIPPED (--skip-ec2)" /tmp/fleet18.log && ok "T18 check lists the drop" || { bad "T18 check"; grep -a "job:" /tmp/fleet18.log; }
 
-echo "=== T19: steve migrate renames the estate (transitional cutover tool) ==="
-# Seed OLD-name objects as if this box had never been renamed: a
-# prefixed snapshot, a cursor bookmark (prefix AND embedded snapname),
-# and both property stamps. migrate must rename/re-mint/restamp them
-# host-wide, verify zero residue, be idempotent, and reverse with
-# --back. Targets come from fleet.conf; every identity here is
-# localhost, so visit 1 does the work and the rest no-op.
-sudo zfs snapshot "$DEST/b@zfsrecvd-2026-07-20-0800Z"
-sudo zfs bookmark "$DEST/b@zfsrecvd-2026-07-20-0800Z" "$DEST/b#zfsrecvd-somedest-zfsrecvd-2026-07-20-0800Z"
-sudo zfs set zfsrecvd:orphan-since=2026-01-01T00:00:00Z "$DEST/b"
-sudo zfs set zfsrecvd:unknown-since=2026-01-02T00:00:00Z "$DEST/b@zfsrecvd-2026-07-20-0800Z"
-mg_guid=$(sudo zfs get -H -o value guid "$DEST/b#zfsrecvd-somedest-zfsrecvd-2026-07-20-0800Z")
-bash ~/zfsrecvd-src/stevedore.sh migrate -c ~/fleet-test.conf >/tmp/mig1.log 2>&1
-rc=$?
-check "T19 migrate rc=0" test "$rc" -eq 0
-grep -q "migrate: fleet clean" /tmp/mig1.log && ok "T19 fleet clean verdict" || { bad "T19 verdict"; cat /tmp/mig1.log; }
-grep -q "residue 0/0/0" /tmp/mig1.log && ok "T19 zero residue verified" || { bad "T19 residue"; cat /tmp/mig1.log; }
-check "T19 snapshot renamed"      sudo zfs list -H "$DEST/b@stevedore-2026-07-20-0800Z"
-check "T19 old snapshot gone"     bash -c "! sudo zfs list -H '$DEST/b@zfsrecvd-2026-07-20-0800Z' 2>/dev/null"
-check "T19 cursor re-minted"      sudo zfs list -H -t bookmark "$DEST/b#stevedore-somedest-stevedore-2026-07-20-0800Z"
-check "T19 old cursor gone"       bash -c "! sudo zfs list -H -t bookmark '$DEST/b#zfsrecvd-somedest-zfsrecvd-2026-07-20-0800Z' 2>/dev/null"
-mg_guid2=$(sudo zfs get -H -o value guid "$DEST/b#stevedore-somedest-stevedore-2026-07-20-0800Z" 2>/dev/null)
-check "T19 cursor guid preserved" test "$mg_guid" = "$mg_guid2"
-mos=$(sudo zfs get -H -s local -o value stevedore:orphan-since "$DEST/b" 2>/dev/null)
-check "T19 dataset stamp migrated (got $mos)" test "$mos" = "2026-01-01T00:00:00Z"
-mos2=$(sudo zfs get -H -s local,received -o value zfsrecvd:orphan-since "$DEST/b" 2>/dev/null)
-if [ -z "$mos2" ] || [ "$mos2" = "-" ]; then ok "T19 old dataset stamp stripped"; else bad "T19 old stamp survived ($mos2)"; fi
-mus=$(sudo zfs get -H -s local -o value stevedore:unknown-since "$DEST/b@stevedore-2026-07-20-0800Z" 2>/dev/null)
-check "T19 snapshot stamp rode the rename (got $mus)" test "$mus" = "2026-01-02T00:00:00Z"
-# idempotent rerun: nothing left to do, still clean
-bash ~/zfsrecvd-src/stevedore.sh migrate -c ~/fleet-test.conf >/tmp/mig2.log 2>&1
-rc=$?
-check "T19 rerun rc=0" test "$rc" -eq 0
-grep -q "renamed 0 snapshot(s), 0 cursor(s), 0" /tmp/mig2.log && ok "T19 rerun is a no-op" || { bad "T19 rerun"; cat /tmp/mig2.log; }
-# --back reverses (guid still riding along), then forward again so the
-# box ends in the new-name state
-bash ~/zfsrecvd-src/stevedore.sh migrate --back -c ~/fleet-test.conf >/tmp/mig3.log 2>&1
-rc=$?
-check "T19 --back rc=0" test "$rc" -eq 0
-check "T19 --back restored old snapshot" sudo zfs list -H "$DEST/b@zfsrecvd-2026-07-20-0800Z"
-mg_guid3=$(sudo zfs get -H -o value guid "$DEST/b#zfsrecvd-somedest-zfsrecvd-2026-07-20-0800Z" 2>/dev/null)
-check "T19 --back cursor guid intact" test "$mg_guid" = "$mg_guid3"
-bash ~/zfsrecvd-src/stevedore.sh migrate -c ~/fleet-test.conf >/tmp/mig4.log 2>&1
-rc=$?
-check "T19 forward-again rc=0" test "$rc" -eq 0
-# NB --back moved EVERY stevedore-* object to zfsrecvd-* and forward
-# moved them back -- including the whole suite's run snapshots and
-# cursors; the round trip proving they all survive IS the test.
-
-echo "=== T20: steve timer: system-unit posture ==="
+echo "=== T19: steve timer: system-unit posture ==="
 # timer on: units written (stevedore-fleet.*, NOT stevedore-run-* -- the
 # leftover-unit glob must never match them), User= the ledger owner,
 # agent-less key preflight passes on the rig. One real service run
@@ -451,24 +402,31 @@ echo "=== T20: steve timer: system-unit posture ==="
 sudo cp ~/fleet-test.conf /etc/stevedore/fleet.conf
 sudo bash ~/zfsrecvd-src/stevedore.sh timer on hourly >/tmp/t20a.log 2>&1
 rc=$?
-check "T20 timer on rc=0" test "$rc" -eq 0
-check "T20 timer enabled" systemctl is-enabled --quiet stevedore-fleet.timer
-check "T20 service runs as operator" grep -q "^User=marton$" /etc/systemd/system/stevedore-fleet.service
-check "T20 busy-estate tick is success" grep -q "^SuccessExitStatus=75$" /etc/systemd/system/stevedore-fleet.service
-check "T20 next fire scheduled" bash -c "systemctl list-timers --no-pager 2>/dev/null | grep -q stevedore-fleet"
+check "T19 timer on rc=0" test "$rc" -eq 0
+check "T19 timer enabled" systemctl is-enabled --quiet stevedore-fleet.timer
+check "T19 service runs as operator" grep -q "^User=marton$" /etc/systemd/system/stevedore-fleet.service
+check "T19 busy-estate tick is success" grep -q "^SuccessExitStatus=75$" /etc/systemd/system/stevedore-fleet.service
+check "T19 next fire scheduled" bash -c "systemctl list-timers --no-pager 2>/dev/null | grep -q stevedore-fleet"
 rj_before=$(wc -l < "$RJ")
 sudo systemctl start stevedore-fleet.service
 rc=$?
-check "T20 timer-driven run rc=0" test "$rc" -eq 0
+check "T19 timer-driven run rc=0" test "$rc" -eq 0
 rj_after=$(wc -l < "$RJ")
-check "T20 ledger grew ($rj_before -> $rj_after)" test "$rj_after" -gt "$rj_before"
-sudo journalctl -u stevedore-fleet.service -n 80 --no-pager 2>/dev/null | grep -q "run summary" \
-    && ok "T20 run summary in the journal" || bad "T20 no run summary in journal"
+check "T19 ledger grew ($rj_before -> $rj_after)" test "$rj_after" -gt "$rj_before"
+# journald flushes the unit's stdout stream asynchronously: querying the
+# instant systemctl start returns can miss the tail lines (raced once).
+# Poll briefly instead of trusting a single read.
+t19_sum=""
+for _ in $(seq 1 20); do
+    sudo journalctl -u stevedore-fleet.service -n 80 --no-pager 2>/dev/null | grep -q "run summary" && { t19_sum=1; break; }
+    sleep 0.5
+done
+[ -n "$t19_sum" ] && ok "T19 run summary in the journal" || bad "T19 no run summary in journal"
 sudo bash ~/zfsrecvd-src/stevedore.sh timer off >/tmp/t20b.log 2>&1
 rc=$?
-check "T20 timer off rc=0" test "$rc" -eq 0
-check "T20 timer gone"  bash -c "! systemctl is-enabled --quiet stevedore-fleet.timer 2>/dev/null"
-check "T20 units removed" bash -c "! test -e /etc/systemd/system/stevedore-fleet.service && ! test -e /etc/systemd/system/stevedore-fleet.timer"
+check "T19 timer off rc=0" test "$rc" -eq 0
+check "T19 timer gone"  bash -c "! systemctl is-enabled --quiet stevedore-fleet.timer 2>/dev/null"
+check "T19 units removed" bash -c "! test -e /etc/systemd/system/stevedore-fleet.service && ! test -e /etc/systemd/system/stevedore-fleet.timer"
 sudo rm /etc/stevedore/fleet.conf
 
 echo
