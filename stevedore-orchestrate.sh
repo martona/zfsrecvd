@@ -338,7 +338,12 @@ run_pool() {   # $1 = live | plain
                 if [[ -n "$i" ]]; then
                     content=$(latest_line "$(job_log "$i")")
                     [[ -n "$content" ]] || content="starting $(job_label "$i")..."
-                    printf '\e[2K%s %s\n' "${c_run}▸${c_off}" "${content:0:cols > 4 ? cols - 4 : 1}" >&2
+                    # budget: "▸ " takes 2 columns; the longest remote line
+                    # is cols-3 (pty pinned to cols-2, pv shrunk one more),
+                    # so cols-3 of content shows pv's full line -- total
+                    # cols-1, still never touching the last column. cols-4
+                    # here used to clip pv's final character (the ETA digit).
+                    printf '\e[2K%s %s\n' "${c_run}▸${c_off}" "${content:0:cols > 3 ? cols - 3 : 1}" >&2
                 else
                     printf '\e[2K· %s\n' "idle" >&2
                 fi
