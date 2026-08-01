@@ -31,7 +31,7 @@ STEVE_HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 source "$STEVE_HERE/stevedore-paths.sh"
 
 usage() {
-    echo "usage: steve install | run [args] | report [args] | check | unlock <replica> | migrate [--back] [-c fleet.conf] [host ...] | uninstall [--purge] | help" >&2
+    echo "usage: steve install | run [args] | report [args] | check | timer [on [cal]|off|status] | unlock <replica> | migrate [--back] [-c fleet.conf] [host ...] | uninstall [--purge] | help" >&2
     exit 64
 }
 
@@ -366,6 +366,106 @@ do_migrate() {
     echo "migrate: fleet clean (${#targets[@]} host(s), direction $dir)" >&2
 }
 
+# The (4) systemd posture (§24): the timer is a SYSTEM unit with User=
+# the operator -- on a one-operator estate the orchestrator's identity IS
+# the operator, so the unit inherits ~/.ssh and ~/.aws and participants
+# already trust it; no keys are copied anywhere. Units are named
+# stevedore-fleet.* on purpose: stevedore-run-* is the per-run listener
+# namespace and the doctor's leftover-unit glob must not match the timer.
+do_timer() {
+    local sub="${1:-status}"
+    [[ $# -gt 0 ]] && shift
+    case "$sub" in
+    status)
+        if systemctl is-enabled --quiet stevedore-fleet.timer 2>/dev/null; then
+            systemctl list-timers stevedore-fleet.timer --no-pager 2>/dev/null || true
+        else
+            echo "stevedore-fleet.timer is not enabled (manual runs only)"
+        fi
+        ;;
+    on)
+        need_root "timer on"
+        local cal="${1:-hourly}" u h dest err denied=()
+        if command -v systemd-analyze >/dev/null \
+            && ! systemd-analyze calendar "$cal" >/dev/null 2>&1; then
+            echo "ERROR: '$cal' is not a valid systemd OnCalendar expression" >&2
+            exit 64
+        fi
+        u=$(stat -c %U "$STEVE_VAR" 2>/dev/null) || u=""
+        if [[ -z "$u" || "$u" == "root" ]]; then
+            echo "ERROR: $STEVE_VAR missing or root-owned; run install via sudo as the operator first" >&2
+            exit 1
+        fi
+        if [[ ! -f "$STEVE_ETC/fleet.conf" ]]; then
+            echo "ERROR: $STEVE_ETC/fleet.conf required (the timer runs 'steve run')" >&2
+            exit 78
+        fi
+        # Agent-less key preflight: under systemd there is no ssh-agent, so
+        # $u's key must open every participant in BatchMode with the agent
+        # stripped. "Permission denied" = passphrase-protected key or missing
+        # authorized_keys -> refuse with the fix; merely unreachable (EC2
+        # asleep, host down) skips the check, same doctrine as steve check.
+        source "$STEVE_HERE/stevedore-ec2helpers.sh"
+        source "$STEVE_HERE/stevedore-fleetparser.sh"
+        fleet_parse "$STEVE_ETC/fleet.conf"
+        for h in "${fleet_participants[@]}"; do
+            dest=$(fleet_ssh_dest "$h")
+            err=$(sudo -u "$u" env -u SSH_AUTH_SOCK ssh "${ssh_opts[@]}" "$dest" true </dev/null 2>&1) && continue
+            if grep -qi "permission denied" <<<"$err"; then
+                denied+=( "$h" )
+            else
+                echo "timer: [$h] unreachable during preflight (EC2 asleep is normal); key check skipped" >&2
+            fi
+        done
+        if [[ ${#denied[@]} -gt 0 ]]; then
+            echo "ERROR: agent-less ssh as '$u' was denied by: ${denied[*]}" >&2
+            echo "Under systemd there is no ssh-agent, so the key must be passphrase-less." >&2
+            echo "Either strip the passphrase, or mint a dedicated stevedore key and add" >&2
+            echo "it to those participants' authorized_keys (from= restriction optional)." >&2
+            exit 1
+        fi
+        cat > /etc/systemd/system/stevedore-fleet.service <<EOF
+[Unit]
+Description=stevedore fleet run
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=$u
+ExecStart=$STEVE_BIN run
+TimeoutStartSec=infinity
+# 75 = estate lock busy: a manual run is in progress and this tick
+# politely yields -- that is scheduling, not failure
+SuccessExitStatus=75
+EOF
+        cat > /etc/systemd/system/stevedore-fleet.timer <<EOF
+[Unit]
+Description=stevedore fleet run schedule
+
+[Timer]
+OnCalendar=$cal
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+        systemctl daemon-reload
+        systemctl enable --now stevedore-fleet.timer
+        echo "timer on: OnCalendar=$cal, runs as $u (logs: journalctl -u stevedore-fleet.service)" >&2
+        ;;
+    off)
+        need_root "timer off"
+        systemctl disable --now stevedore-fleet.timer 2>/dev/null || true
+        rm -f /etc/systemd/system/stevedore-fleet.timer /etc/systemd/system/stevedore-fleet.service
+        systemctl daemon-reload
+        systemctl reset-failed stevedore-fleet.service 2>/dev/null || true
+        echo "timer off; units removed (manual 'steve run' unaffected)" >&2
+        ;;
+    *) usage ;;
+    esac
+}
+
 do_help() {
     cat <<EOF
 steve -- fleet ZFS replication (stevedore)
@@ -379,6 +479,10 @@ steve -- fleet ZFS replication (stevedore)
                               dataset/snapshot with its eligible-in countdown)
   steve check                 doctor: install, config, deps, reachability,
                               crashed-run leftovers
+  steve timer on [calendar]   scheduled runs as a system unit (default
+                              hourly; any OnCalendar expression). Runs as
+                              the ledger owner; preflights agent-less ssh.
+  steve timer off | status    remove the schedule / show the next fire
   steve unlock <replica>      load a received replica's keys from its own
                               keystore (read-only; LUKS or plain)
   steve migrate [--back] [h]  TRANSITIONAL: the one-time zfsrecvd ->
@@ -406,6 +510,7 @@ case "$cmd" in
     report)    exec "$STEVE_HERE/stevedore-report.sh" "$@" ;;
     unlock)    exec "$STEVE_HERE/stevedore-unlock-replica.sh" "$@" ;;
     migrate)   do_migrate "$@" ;;
+    timer)     do_timer "$@" ;;
     check)     do_check ;;
     help|-h|--help) do_help ;;
     *)         usage ;;

@@ -61,6 +61,7 @@ steve run              # one fleet run
 steve run --check      # plan preview, nothing provisioned
 steve report           # what happened, trends, gc findings
 steve check            # doctor
+steve timer on         # scheduled runs (hourly by default); off | status
 steve help             # the rest
 ```
 

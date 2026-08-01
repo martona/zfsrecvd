@@ -442,6 +442,35 @@ check "T19 forward-again rc=0" test "$rc" -eq 0
 # moved them back -- including the whole suite's run snapshots and
 # cursors; the round trip proving they all survive IS the test.
 
+echo "=== T20: steve timer: system-unit posture ==="
+# timer on: units written (stevedore-fleet.*, NOT stevedore-run-* -- the
+# leftover-unit glob must never match them), User= the ledger owner,
+# agent-less key preflight passes on the rig. One real service run
+# proves the headless path end to end (same-minute rerun = idempotent),
+# then off removes everything.
+sudo cp ~/fleet-test.conf /etc/stevedore/fleet.conf
+sudo bash ~/zfsrecvd-src/stevedore.sh timer on hourly >/tmp/t20a.log 2>&1
+rc=$?
+check "T20 timer on rc=0" test "$rc" -eq 0
+check "T20 timer enabled" systemctl is-enabled --quiet stevedore-fleet.timer
+check "T20 service runs as operator" grep -q "^User=marton$" /etc/systemd/system/stevedore-fleet.service
+check "T20 busy-estate tick is success" grep -q "^SuccessExitStatus=75$" /etc/systemd/system/stevedore-fleet.service
+check "T20 next fire scheduled" bash -c "systemctl list-timers --no-pager 2>/dev/null | grep -q stevedore-fleet"
+rj_before=$(wc -l < "$RJ")
+sudo systemctl start stevedore-fleet.service
+rc=$?
+check "T20 timer-driven run rc=0" test "$rc" -eq 0
+rj_after=$(wc -l < "$RJ")
+check "T20 ledger grew ($rj_before -> $rj_after)" test "$rj_after" -gt "$rj_before"
+sudo journalctl -u stevedore-fleet.service -n 80 --no-pager 2>/dev/null | grep -q "run summary" \
+    && ok "T20 run summary in the journal" || bad "T20 no run summary in journal"
+sudo bash ~/zfsrecvd-src/stevedore.sh timer off >/tmp/t20b.log 2>&1
+rc=$?
+check "T20 timer off rc=0" test "$rc" -eq 0
+check "T20 timer gone"  bash -c "! systemctl is-enabled --quiet stevedore-fleet.timer 2>/dev/null"
+check "T20 units removed" bash -c "! test -e /etc/systemd/system/stevedore-fleet.service && ! test -e /etc/systemd/system/stevedore-fleet.timer"
+sudo rm /etc/stevedore/fleet.conf
+
 echo
 echo "=== RESULT: $PASS passed, $FAIL failed ==="
 if [ "$FAIL" -gt 0 ]; then
