@@ -205,17 +205,18 @@ do_check() {
                                      [[ \" \$tl \" == *\" \$t \"* ]] || tl=\"\$tl \$t\"
                                  fi
                              done
-                             printf '%s %s%s\n' \"\$h\" \"\$(fleet_ssh_dest \"\$h\")\" \"\$tl\"
+                             printf '%s %s %s%s\n' \"\$h\" \"\$(fleet_ssh_dest \"\$h\")\" \"\${fleet_host_recv[\$h]:--}\" \"\$tl\"
                          done" 2>/dev/null) || hosts=""
         if [[ -n "$hosts" ]]; then
             source "$STEVE_HERE/stevedore-ec2helpers.sh"
-            local rest
-            while read -r h dest rest; do
+            local rest rroot probe_rroots=()
+            while read -r h dest rroot rest; do
                 [[ -n "$h" ]] || continue
                 ssh "${ssh_opts[@]}" "$dest" true </dev/null >/dev/null 2>&1 &
                 probe_pids+=( $! )
                 probe_hosts+=( "$h" )
                 probe_dests+=( "$dest" )
+                probe_rroots+=( "$rroot" )
                 probe_tgts+=( "$rest" )
             done <<<"$hosts"
             for (( i = 0; i < ${#probe_pids[@]}; i++ )); do
@@ -234,6 +235,14 @@ do_check() {
                     sudo -n true 2>/dev/null || echo 'HARD passwordless sudo missing'
                     for b in $deps; do command -v \$b >/dev/null || m=\"\$m \$b\"; done
                     [ -z \"\$m\" ] || echo \"HARD missing dependencies:\$m\"
+                    rr='${probe_rroots[i]}'
+                    if [ \"\$rr\" != '-' ]; then
+                        if ! zfs list -H -o name \"\$rr\" >/dev/null 2>&1; then
+                            echo \"HARD recv_root '\$rr' does not exist\"
+                        elif [ \"\$(zfs get -H -o value keystatus \"\$rr\" 2>/dev/null)\" = unavailable ]; then
+                            echo \"HARD recv_root '\$rr' encryption key not loaded (new clients and plain receives will refuse)\"
+                        fi
+                    fi
                     for t in ${probe_tgts[i]}; do
                         n=\${t%:*}; p=\${t##*:}
                         if ! getent hosts \"\$n\" >/dev/null 2>&1; then
@@ -258,7 +267,7 @@ do_check() {
                 fi
             done
             if (( clean > 0 )); then
-                ok "deep probe clean on $clean host(s): sudo, deps, and every job's dial resolve+route"
+                ok "deep probe clean on $clean host(s): sudo, deps, recv_root+keystatus, every job's dial resolve+route"
             fi
         fi
     fi

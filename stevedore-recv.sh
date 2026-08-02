@@ -128,28 +128,45 @@ in_tree() {
 
 # Make sure recv_root/<CN> exists (unmounted). Created without -p on
 # purpose: -p would ignore -o mountpoint=none, and a missing recv_root is
-# an operator error we want to surface, not paper over.
+# an operator error we want to surface, not paper over. On failure the
+# REAL zfs error rides BASE_ERR into the refusal detail: the canned
+# "recv_root missing?" guess once hid an unloaded encryption key on the
+# EC2 recv root for a whole debugging round (an encrypted recv_root
+# cannot create children -- new clients -- without its key loaded).
+BASE_ERR=""
 ensure_base() {
+    local cerr
     if [[ -z "$base_ready" ]]; then
-        zfs list -H -o name "$dest_base" >/dev/null 2>&1 \
-            || zfs create -o mountpoint=none "$dest_base" 2>/dev/null \
-            || return 1
+        if ! zfs list -H -o name "$dest_base" >/dev/null 2>&1; then
+            if ! cerr=$(zfs create -o mountpoint=none "$dest_base" 2>&1); then
+                BASE_ERR=$(tail -n 1 <<<"$cerr" | tr -dc '[:print:]' | cut -c 1-300)
+                return 1
+            fi
+        fi
         base_ready=1
     fi
 }
 
 # Make sure the destination parent of a dataset exists, so that
-# `zfs recv -e <parent>` has somewhere to land. Nonzero only when even the
-# CN base can't be created (caller turns that into ERR refused).
+# `zfs recv -e <parent>` has somewhere to land. Nonzero when the CN base
+# or an intermediate parent can't be created (caller turns that into
+# ERR refused). A failed -p create used to be swallowed (pre-existing is
+# fine and -p is quiet about it), but a REAL failure -- unloaded key on
+# an encrypted root -- then died later at recv time, session-fatally,
+# instead of as a clean per-dataset refusal.
 ensure_parent() {
-    local parent="${dest_base}/$1"
+    local parent="${dest_base}/$1" cerr
     parent="${parent%/*}"
     if [[ -n "${made_parents[$parent]:-}" ]]; then
         return 0
     fi
     ensure_base || return 1
-    # -o is ignored with -p (hence ensure_base above); pre-existing is fine.
-    zfs create -p "$parent" 2>/dev/null || true
+    # -o is ignored with -p (hence ensure_base above); pre-existing is
+    # fine and exits 0 under -p, so a nonzero here is a real failure.
+    if ! cerr=$(zfs create -p "$parent" 2>&1); then
+        BASE_ERR=$(tail -n 1 <<<"$cerr" | tr -dc '[:print:]' | cut -c 1-300)
+        return 1
+    fi
     made_parents[$parent]=1
 }
 
@@ -389,8 +406,8 @@ do_send() {
         fi
     fi
     if ! ensure_parent "$ds"; then
-        out "ERR refused $ds cannot create destination (recv_root '$recv_root' missing?)"
-        log "refused SEND $ds: cannot create destination under $dest_base"
+        out "ERR refused $ds cannot create destination: ${BASE_ERR:-recv_root '$recv_root' missing?}"
+        log "refused SEND $ds: cannot create destination under $dest_base: ${BASE_ERR:-unknown}"
         return 0
     fi
     local parent="${dest_base}/${ds}"
