@@ -563,7 +563,7 @@ provision_host() {   # $1 = host identity
     if [[ "$fleet_opt_transport" == "haproxy" ]]; then
         deps="$deps haproxy"
     fi
-    if ! fleet_ssh "$dest" "for b in $deps; do command -v \$b >/dev/null || { echo \"missing dependency on this host: \$b\" >&2; exit 9; }; done; sudo -n mkdir -p $rdir && sudo -n chmod 700 $rdir && sudo -n openssl req -new -newkey rsa:2048 -nodes -keyout $rdir/client.key -subj /CN=$id 2>/dev/null && sudo -n chmod 600 $rdir/client.key" \
+    if ! fleet_ssh "$dest" "m=''; for b in $deps; do command -v \$b >/dev/null || m=\"\$m \$b\"; done; [ -z \"\$m\" ] || { echo \"missing dependencies on this host:\$m\" >&2; exit 9; }; sudo -n mkdir -p $rdir && sudo -n chmod 700 $rdir && sudo -n openssl req -new -newkey rsa:2048 -nodes -keyout $rdir/client.key -subj /CN=$id 2>/dev/null && sudo -n chmod 600 $rdir/client.key" \
         </dev/null > "$rundir/$id.csr"; then
         echo "ERROR: [$id] unreachable or failed preflight" >&2
         return 1

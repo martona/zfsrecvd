@@ -184,22 +184,39 @@ do_check() {
         fail "missing dependencies: ${dmiss[*]}"
     fi
 
-    # participant reachability (parallel, the cadence-probe pattern)
+    # participant probes. Reachability fans out in parallel (the cadence
+    # pattern); every REACHABLE host then gets ONE deep probe that runs
+    # ALL of its checks and reports every failure -- sudo, each
+    # dependency, and resolution+route to every destination it sends to
+    # (owner ask after onboarding lemur cost one run per discovered
+    # problem: no-tailscale showed up only as a mid-run job failure).
+    # Route probes treat connection-refused as PASS: outside a run
+    # nothing listens, but a refusal proves name and route work.
     if [[ -f "$STEVE_ETC/fleet.conf" ]]; then
-        local hosts probe_pids=() probe_hosts=() h i unreach=()
+        local hosts probe_pids=() probe_hosts=() probe_dests=() probe_tgts=() h i unreach=()
         hosts=$(bash -c "source '$STEVE_HERE/stevedore-ec2helpers.sh' 2>/dev/null
                          source '$STEVE_HERE/stevedore-fleetparser.sh'
                          fleet_parse '$STEVE_ETC/fleet.conf' 2>/dev/null
                          for h in \"\${fleet_participants[@]}\"; do
-                             printf '%s %s\n' \"\$h\" \"\$(fleet_ssh_dest \"\$h\")\"
+                             tl=''
+                             for (( i = 0; i < \${#fleet_job_src[@]}; i++ )); do
+                                 if [[ \"\${fleet_job_src[i]}\" == \"\$h\" ]]; then
+                                     t=\"\$(fleet_data \"\${fleet_job_dest[i]}\"):\$fleet_opt_port\"
+                                     [[ \" \$tl \" == *\" \$t \"* ]] || tl=\"\$tl \$t\"
+                                 fi
+                             done
+                             printf '%s %s%s\n' \"\$h\" \"\$(fleet_ssh_dest \"\$h\")\" \"\$tl\"
                          done" 2>/dev/null) || hosts=""
         if [[ -n "$hosts" ]]; then
             source "$STEVE_HERE/stevedore-ec2helpers.sh"
-            while read -r h dest; do
+            local rest
+            while read -r h dest rest; do
                 [[ -n "$h" ]] || continue
                 ssh "${ssh_opts[@]}" "$dest" true </dev/null >/dev/null 2>&1 &
                 probe_pids+=( $! )
                 probe_hosts+=( "$h" )
+                probe_dests+=( "$dest" )
+                probe_tgts+=( "$rest" )
             done <<<"$hosts"
             for (( i = 0; i < ${#probe_pids[@]}; i++ )); do
                 wait "${probe_pids[i]}" || unreach+=( "${probe_hosts[i]}" )
@@ -208,6 +225,40 @@ do_check() {
                 ok "all ${#probe_hosts[@]} fleet participants reachable"
             else
                 warn "unreachable participants (offline or EC2 asleep is normal): ${unreach[*]}"
+            fi
+            local deep clean=0 line
+            for (( i = 0; i < ${#probe_hosts[@]}; i++ )); do
+                [[ " ${unreach[*]:-} " == *" ${probe_hosts[i]} "* ]] && continue
+                deep=$(ssh "${ssh_opts[@]}" "${probe_dests[i]}" "
+                    m=''
+                    sudo -n true 2>/dev/null || echo 'HARD passwordless sudo missing'
+                    for b in $deps; do command -v \$b >/dev/null || m=\"\$m \$b\"; done
+                    [ -z \"\$m\" ] || echo \"HARD missing dependencies:\$m\"
+                    for t in ${probe_tgts[i]}; do
+                        n=\${t%:*}; p=\${t##*:}
+                        if ! getent hosts \"\$n\" >/dev/null 2>&1; then
+                            echo \"SOFT cannot resolve dial name '\$n' (VPN/tailscale missing?)\"
+                        else
+                            timeout 5 bash -c \"</dev/tcp/\$n/\$p\" 2>/dev/null
+                            [ \$? -eq 124 ] && echo \"SOFT no route to \$n:\$p (connect timeout)\"
+                        fi
+                    done
+                    true" </dev/null 2>/dev/null) || deep="HARD deep probe died mid-check"
+                if [[ -z "$deep" ]]; then
+                    clean=$(( clean + 1 ))
+                else
+                    while IFS= read -r line; do
+                        [[ -z "$line" ]] && continue
+                        if [[ "$line" == HARD\ * ]]; then
+                            fail "[${probe_hosts[i]}] ${line#HARD }"
+                        else
+                            warn "[${probe_hosts[i]}] ${line#SOFT } (EC2 asleep is normal for ec2 dials)"
+                        fi
+                    done <<<"$deep"
+                fi
+            done
+            if (( clean > 0 )); then
+                ok "deep probe clean on $clean host(s): sudo, deps, and every job's dial resolve+route"
             fi
         fi
     fi

@@ -429,12 +429,17 @@ rc=$?
 check "T19 timer-driven run rc=0" test "$rc" -eq 0
 rj_after=$(wc -l < "$RJ")
 check "T19 ledger grew ($rj_before -> $rj_after)" test "$rj_after" -gt "$rj_before"
-# journald flushes the unit's stdout stream asynchronously: querying the
-# instant systemctl start returns can miss the tail lines (raced once).
-# Poll briefly instead of trusting a single read.
+# Two flake sources, both survived here: journald flushes the unit's
+# stream asynchronously (poll, don't trust one read), and under the
+# suite's pipefail a `| grep -q` that exits at first match SIGPIPEs
+# journalctl (141) and fails the pipeline EVEN ON A MATCH -- plain grep
+# with output discarded reads to EOF and dodges it.
 t19_sum=""
 for _ in $(seq 1 20); do
-    sudo journalctl -u stevedore-fleet.service -n 80 --no-pager 2>/dev/null | grep -q "run summary" && { t19_sum=1; break; }
+    if sudo journalctl -u stevedore-fleet.service -n 80 --no-pager 2>/dev/null | grep "run summary" >/dev/null; then
+        t19_sum=1
+        break
+    fi
     sleep 0.5
 done
 [ -n "$t19_sum" ] && ok "T19 run summary in the journal" || bad "T19 no run summary in journal"

@@ -436,6 +436,15 @@ sent_n=0                     # successful transfers this run (for the summary)
 wire_bytes=0                 # receiver-reported bytes this run (2.1 OK lines)
 LAST_REFUSAL=""              # detail of the last ERR refused (guid-veto replanning)
 xfer() {
+    # local -: set-option changes stay confined to this function. The
+    # set +e/set -e pair around the pipeline below once LEAKED: it
+    # re-armed errexit inside the session loop's deliberate set +e
+    # window, so the first completed stream armed the trap and the next
+    # nonzero xfer return killed the whole script SILENTLY with that
+    # status -- no retry, no resume, no summary (bit the fleet when a
+    # 64G-dirty receiver stalled recv finalization past the result
+    # timeout: four truncated logs, exit 2, nothing else).
+    local -
     local announce="$1" est="$2" cmdline="$3"
     shift 3
     echo "$announce" >&2
@@ -469,8 +478,11 @@ xfer() {
     fi
     # Stop-and-wait: nothing is written after the stream until this result
     # line arrives -- that guarantee is what lets zfs recv read the socket
-    # directly with no framing layer.
-    IFS= read -r -t 600 -u "$IN" reply || return 2
+    # directly with no framing layer. The wait must outlast the receiver's
+    # recv finalization: a txg sync on a big-dirty-tuned pool (zeus runs
+    # zfs_dirty_data_max=64G on rust) can stall well past ten minutes.
+    # Env-overridable for tests and unusual estates.
+    IFS= read -r -t "${STEVEDORE_RESULT_TIMEOUT:-1800}" -u "$IN" reply || return 2
     case "$reply" in
         OK\ *)
             sent_n=$(( sent_n + 1 ))
@@ -768,7 +780,7 @@ while true; do
     if [[ -z "$session_dead" ]]; then
         # Clean finish: ENDTREE triggers the receiver's prune+stamp pass.
         if printf 'ENDTREE\n' >&"$OUT" 2>/dev/null \
-            && IFS= read -r -t 600 -u "$IN" reply \
+            && IFS= read -r -t "${STEVEDORE_RESULT_TIMEOUT:-1800}" -u "$IN" reply \
             && [[ "$reply" == "OK ENDTREE" ]]; then
             :
         else

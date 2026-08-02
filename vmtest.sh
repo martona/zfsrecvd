@@ -316,6 +316,61 @@ sudo zfs inherit stevedore:orphan-since ztest/rcvdst
 rv2=$(sudo zfs get -H -s local,received -o value stevedore:orphan-since ztest/rcvdst 2>/dev/null)
 if [ -z "$rv2" ] || [ "$rv2" = "-" ]; then ok "T16 inherit clears received (no resurrection)"; else bad "T16 inherit left '$rv2'"; fi
 
+echo "=== T17: receiver stall past the result timeout: retry, not silent death ==="
+# A receiver that drains the stream then goes silent (a huge txg sync,
+# from the wire's perspective) once killed the client SILENTLY with no
+# retry and no summary: xfer's set +e/set -e pair leaked errexit into
+# the session loop's deliberate +e window -- armed by the first
+# completed stream, tripped by the next nonzero xfer return. The fake
+# server stalls session one past STEVEDORE_RESULT_TIMEOUT, then reports
+# the target present on reconnect; the client must retry and finish 0.
+sudo zfs destroy -r ztest/stallt 2>/dev/null
+sudo zfs create ztest/stallt
+sudo zfs snapshot ztest/stallt@a
+sudo zfs snapshot ztest/stallt@b
+mkdir -p /tmp/stallsrv
+rm -f /tmp/stallsrv/seen
+cat > /tmp/stallsrv/server.sh <<'EOF'
+#!/bin/bash
+IFS= read -r hello
+printf 'OK stevedore2.1\n'
+while IFS= read -r l; do [ -z "$l" ] && break; done
+if [ ! -e /tmp/stallsrv/seen ]; then
+    touch /tmp/stallsrv/seen
+    printf 'OK TREE\nHAVE ztest/stallt a\n\n'
+    IFS= read -r req
+    printf 'GO\n'
+    timeout 4 dd of=/dev/null bs=64k 2>/dev/null
+    sleep 30
+    exit 0
+fi
+printf 'OK TREE\nHAVE ztest/stallt a,b\n\n'
+IFS= read -r et
+printf 'OK ENDTREE\n'
+IFS= read -r bye
+EOF
+chmod +x /tmp/stallsrv/server.sh
+cat > /tmp/stallsrv/run.conf <<'EOF'
+[transport]
+haproxy
+[tunnel]
+stalldial 25299
+[prune-prefixes]
+stevedore-
+EOF
+pkill -f "TCP-LISTEN:25299" 2>/dev/null
+nohup socat TCP-LISTEN:25299,bind=127.0.0.1,reuseaddr,fork EXEC:/tmp/stallsrv/server.sh >/dev/null 2>&1 &
+sleep 1
+sudo env STEVEDORE_CONF=/tmp/stallsrv/run.conf STEVEDORE_RESULT_TIMEOUT=6 STEVEDORE_DEST_ID=stalltest \
+    /usr/local/lib/stevedore/stevedore-sendtree.sh --no-prune ztest/stallt@b stalldial >/tmp/t17.log 2>&1
+rc=$?
+check "T17 exit 0 after stall+retry" test "$rc" -eq 0
+grep -q "session with \[stalldial\] lost; reconnecting" /tmp/t17.log && ok "T17 stall became a retry, not a death" || { bad "T17 no retry"; cat /tmp/t17.log; }
+grep -q "0 sent, 1 up to date, 0 skipped, 0 failed" /tmp/t17.log && ok "T17 recovered clean on reconnect" || { bad "T17 summary"; cat /tmp/t17.log; }
+grep -q "WIRE-BYTES:" /tmp/t17.log && ok "T17 epilogue intact (no silent truncation)" || bad "T17 epilogue missing"
+pkill -f "TCP-LISTEN:25299" 2>/dev/null
+sudo zfs destroy -r ztest/stallt 2>/dev/null
+
 echo
 echo "=== RESULT: $PASS passed, $FAIL failed ==="
 if [ "$FAIL" -gt 0 ]; then
