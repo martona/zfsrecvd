@@ -10,6 +10,8 @@ SSH doesn't cut it when it comes to sending ZFS snapshots to faraway lands. Open
 
 Stock OpenSSH caps long fat pipes very harshly. As an example, I'm getting 500Mbits on a 30ms link to the nearest AWS datacenter through its small window. With OpenSSH replaced, I get 4Gbits.
 
+Why not `zrepl / sanoid / syncoid / etc`? All due respect to these tools (much inspiration was taken from them) but they all fall short. `syncoid` uses SSH for transport, `zrepl` doesn't handle orphaned datasets / snapshots, and so on. Plus, it was fun making it.
+
 None of this is rocket science, nor do I expect it to interest anyone, but I do use it a lot. Github is an ideal place to clone it from, and there's no point in keeping it private either.
 
 ## What
