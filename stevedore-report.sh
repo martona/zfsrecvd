@@ -85,26 +85,33 @@ END {
     if (wb > 0) printf ", %s on wire", h(wb)
     printf "\n"
 
-    # receivers table: numbers right-aligned, widths from content
+    # receivers table: numbers right-aligned, widths from content.
+    # "total" = the recv tree, absolute used (the record field "after"):
+    # on a backup target the whole tree is history, base-vs-snaps is not
+    # a distinction worth drawing (owner 2026-08-04); the field has been
+    # in every record since reports v1, so old history renders it too.
+    # NB comments here live inside a bash single-quoted string: no
+    # apostrophes, ever.
     rn = 0; line = rline[r]
     while (match(line, "\\{\"id\":\"[^\"]*\",\"before\":[^}]*\\}")) {
         rec = substr(line, RSTART, RLENGTH); line = substr(line, RSTART + RLENGTH)
         rn++
         rid[rn]  = g(rec, "id")
+        rtot[rn] = h(g(rec, "after") + 0)
         rnet[rn] = h(g(rec, "after") - g(rec, "before"))
         rpr[rn]  = h(g(rec, "pruned") + 0)
         rav[rn]  = h(g(rec, "avail") + 0)
     }
     if (rn > 0) {
-        w1 = length("receiver"); w2 = length("net"); w3 = length("pruned"); w4 = length("avail")
+        w1 = length("receiver"); w0 = length("total"); w2 = length("net"); w3 = length("pruned"); w4 = length("avail")
         for (i = 1; i <= rn; i++) {
-            w1 = wmax(w1, rid[i]);  w2 = wmax(w2, rnet[i])
+            w1 = wmax(w1, rid[i]);  w0 = wmax(w0, rtot[i]);  w2 = wmax(w2, rnet[i])
             w3 = wmax(w3, rpr[i]);  w4 = wmax(w4, rav[i])
         }
-        fmt = "  %-" w1 "s  %" w2 "s  %" w3 "s  %" w4 "s\n"
+        fmt = "  %-" w1 "s  %" w0 "s  %" w2 "s  %" w3 "s  %" w4 "s\n"
         print ""
-        printf fmt, "receiver", "net", "pruned", "avail"
-        for (i = 1; i <= rn; i++) printf fmt, rid[i], rnet[i], rpr[i], rav[i]
+        printf fmt, "receiver", "total", "net", "pruned", "avail"
+        for (i = 1; i <= rn; i++) printf fmt, rid[i], rtot[i], rnet[i], rpr[i], rav[i]
     }
 
     # sources table: per-tree used / avail, plus the snaps-budget column
@@ -119,10 +126,13 @@ END {
         str[sn] = g(rec, "tree")
         sus[sn] = h(g(rec, "used") + 0)
         sav[sn] = h(g(rec, "avail") + 0)
-        sfp[sn] = ""; spn[sn] = 0; sfl[sn] = 0
+        sfa[sn] = ""; sqa[sn] = ""; spc[sn] = ""; spn[sn] = 0; sfl[sn] = 0
         if (g(rec, "snapfp") != "") {
             anysb = 1
-            sfp[sn] = h(g(rec, "snapfp") + 0) "/" h(g(rec, "snapbudget") + 0)
+            sfa[sn] = h(g(rec, "snapfp") + 0)
+            sqa[sn] = h(g(rec, "snapbudget") + 0)
+            if (g(rec, "snapbudget") + 0 > 0)
+                spc[sn] = sprintf("%d%%", g(rec, "snapfp") * 100 / g(rec, "snapbudget"))
             spn[sn] = g(rec, "snappruned") + 0
             sfl[sn] = (g(rec, "snapstate") == "floor" ? 1 : 0)
         }
@@ -135,23 +145,24 @@ END {
         }
         print ""
         if (anysb) {
-            w5 = length("snaps")
+            w5 = length("snaps"); w6 = length("quota"); w7 = length("quota%")
             for (i = 1; i <= sn; i++) {
-                sc[i] = (sfp[i] != "" ? sfp[i] : "-")
-                if (spn[i] > 0) sc[i] = sc[i] " (pruned " spn[i] ")"
-                w5 = wmax(w5, sc[i])
+                if (sfa[i] == "") { sfa[i] = "-"; sqa[i] = "-"; spc[i] = "-" }
+                w5 = wmax(w5, sfa[i]); w6 = wmax(w6, sqa[i]); w7 = wmax(w7, spc[i])
             }
-            fmt = "  %-" w1 "s  %-" w2 "s  %" w3 "s  %" w4 "s  %" w5 "s\n"
-            printf fmt, "source", "tree", "used", "avail", "snaps"
-            for (i = 1; i <= sn; i++) printf fmt, sid[i], str[i], sus[i], sav[i], sc[i]
+            fmt = "  %-" w1 "s  %-" w2 "s  %" w3 "s  %" w4 "s  %" w5 "s  %" w6 "s  %" w7 "s\n"
+            printf fmt, "source", "tree", "used", "avail", "snaps", "quota", "quota%"
+            for (i = 1; i <= sn; i++) printf fmt, sid[i], str[i], sus[i], sav[i], sfa[i], sqa[i], spc[i]
         } else {
             fmt = "  %-" w1 "s  %-" w2 "s  %" w3 "s  %" w4 "s\n"
             printf fmt, "source", "tree", "used", "avail"
             for (i = 1; i <= sn; i++) printf fmt, sid[i], str[i], sus[i], sav[i]
         }
+        for (i = 1; i <= sn; i++) if (spn[i] > 0)
+            printf "  snaps [%s] %s: quota pruned %d snapshot(s) this run\n", sid[i], str[i], spn[i]
         for (i = 1; i <= sn; i++) if (sfl[i])
-            printf "  SNAPS-FLOOR  [%s] %s: %s pinned with only newest snapshots left -- raise snaps= or accept it\n", \
-                sid[i], str[i], sfp[i]
+            printf "  SNAPS-FLOOR  [%s] %s: %s pinned vs %s quota with only newest snapshots left -- raise the quota or accept it\n", \
+                sid[i], str[i], sfa[i], sqa[i]
     }
 
     # gc findings (fleetrun harvests gc.sh stdout per receiver into the

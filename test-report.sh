@@ -33,9 +33,9 @@ grep -q "FAIL  \[jup\] tank/a -> \[cp4\]" <<<"$out" && ok "failure drilldown lin
 grep -q "datasets: tank/a/vol tank/a/deep" <<<"$out" && ok "failed_ds surfaced" || bad "failed_ds: $out"
 # table rows are exact-line asserts: they prove the right-alignment, not
 # just the numbers
-grep -qx "  receiver   net  pruned   avail" <<<"$out" && ok "receiver table header" || bad "recv hdr: $out"
-grep -qx "  berg      2.0K    512B    4.8M" <<<"$out" && ok "receiver row aligned (berg)" || bad "recv berg: $out"
-grep -qx "  cp4         0B      0B  878.9K" <<<"$out" && ok "receiver row aligned (cp4)" || bad "recv cp4: $out"
+grep -qx "  receiver  total   net  pruned   avail" <<<"$out" && ok "receiver table header (with total)" || bad "recv hdr: $out"
+grep -qx "  berg       4.0K  2.0K    512B    4.8M" <<<"$out" && ok "receiver row aligned (berg)" || bad "recv berg: $out"
+grep -qx "  cp4        800B    0B      0B  878.9K" <<<"$out" && ok "receiver row aligned (cp4)" || bad "recv cp4: $out"
 grep -qx "  source  tree      used   avail" <<<"$out" && ok "source table header" || bad "src hdr: $out"
 grep -qx "  jup     tank/a  195.3K  683.6K" <<<"$out" && ok "source row aligned" || bad "src row: $out"
 grep -q "gc \[berg\] tank/recv/x/gone: ORPHAN CANDIDATE" <<<"$out" && ok "gc warning rendered" || bad "gc warn: $out"
@@ -72,15 +72,17 @@ EOF
 out3=$(bash "$HERE/stevedore-report.sh" -f "$FX/snaps.jsonl" 2>&1)
 rc=$?
 [[ $rc -eq 0 ]] && ok "snaps fixture renders rc=0" || { bad "snaps rc=$rc"; echo "$out3"; }
-grep -qx "  source  tree      used   avail                 snaps" <<<"$out3" \
-    && ok "source header grows the snaps column" || bad "snaps hdr: $out3"
-grep -qx "  jup     tank/a  120.6K  759.5K            1.0G/10.0G" <<<"$out3" \
+grep -qx "  source  tree      used   avail  snaps  quota  quota%" <<<"$out3" \
+    && ok "source header grows snaps/quota/quota% columns" || bad "snaps hdr: $out3"
+grep -qx "  jup     tank/a  120.6K  759.5K   1.0G  10.0G     10%" <<<"$out3" \
     && ok "healthy budget row aligned" || bad "snaps ok row: $out3"
-grep -qx "  jup     tank/b   1000B    2.0K  5.0G/4.0G (pruned 7)" <<<"$out3" \
-    && ok "floor row shows pruned count" || bad "snaps floor row: $out3"
-grep -qx "  odin    rpool     2.0K    4.0K                     -" <<<"$out3" \
-    && ok "budget-less tree dashes the column" || bad "snaps dash row: $out3"
-grep -q "SNAPS-FLOOR  \[jup\] tank/b: 5.0G/4.0G pinned" <<<"$out3" \
+grep -qx "  jup     tank/b   1000B    2.0K   5.0G   4.0G    125%" <<<"$out3" \
+    && ok "floor row shows >100 quota%" || bad "snaps floor row: $out3"
+grep -qx "  odin    rpool     2.0K    4.0K      -      -       -" <<<"$out3" \
+    && ok "budget-less tree dashes the columns" || bad "snaps dash row: $out3"
+grep -q "snaps \[jup\] tank/b: quota pruned 7 snapshot(s) this run" <<<"$out3" \
+    && ok "budget-prune note line" || bad "prune note: $out3"
+grep -q "SNAPS-FLOOR  \[jup\] tank/b: 5.0G pinned vs 4.0G quota" <<<"$out3" \
     && ok "floor warning line" || bad "floor line: $out3"
 
 echo "=== RESULT: $PASS passed, $FAIL failed ==="
