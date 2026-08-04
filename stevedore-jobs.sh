@@ -10,7 +10,10 @@
 # preserved byte-for-byte, except [hosts] rows this session adds
 # (appended to the section) or removes. The [jobs] body is regenerated
 # row-major and column-aligned on save; comment lines inside it are
-# kept, hoisted to the top of the section. Saves validate through
+# kept, hoisted to the top of the section. Job-row attribute tails
+# (e.g. snaps=1T) are per-(src,tree) facts: preserved verbatim, re-emitted
+# on every row of the group (so a newly toggled cell inherits them), not
+# editable here yet. Saves validate through
 # fleetparser (loud, fatal parser = the backstop) into a temp file +
 # atomic rename; the previous version is kept once as <conf>.bak.
 #
@@ -67,6 +70,7 @@ NEWHOSTS=()               # host rows added this session
 JR=()                     # rows: "src<TAB>tree", first-seen order
 JC=()                     # cols: receiver identities, [hosts] order
 declare -A CELL=()        # "src|tree|dest" -> 1
+declare -A ROWEXTRA=()    # "src|tree" -> "key=value ..." attribute tail
 declare -A HOSTLN=()      # host identity -> its [hosts] line index
 
 # trim + de-comment exactly like fleetparser, but non-destructively
@@ -81,7 +85,7 @@ jobs_load() {
     local nr=0 section="" line c w
     local -a words
     FL=(); JCOMMENTS=(); JR=(); JC=(); NEWHOSTS=()
-    CELL=(); HOSTLN=(); DROPLN=(); JOBSBODY=()
+    CELL=(); ROWEXTRA=(); HOSTLN=(); DROPLN=(); JOBSBODY=()
     JOBS_HDR=-1; HOSTS_HDR=-1; HOSTS_ANCHOR=-1
     while IFS= read -r line || [[ -n "$line" ]]; do
         FL+=( "$line" )
@@ -105,9 +109,17 @@ jobs_load() {
                     fi
                 else
                     read -r -a words <<<"$c"
-                    if (( ${#words[@]} == 3 )); then
+                    if (( ${#words[@]} >= 3 )); then
                         jobs_row_add "${words[0]}" "${words[1]}"
                         CELL["${words[0]}|${words[1]}|${words[2]}"]=1
+                        # attribute tail (e.g. snaps=1T) is a per-(src,tree)
+                        # fact; the open-time fleet_parse guaranteed all rows
+                        # of a (src,tree) agree, so last-wins is safe. Kept
+                        # verbatim and re-emitted on every row of the group --
+                        # a newly toggled cell inherits it automatically.
+                        if (( ${#words[@]} > 3 )); then
+                            ROWEXTRA["${words[0]}|${words[1]}"]="${words[*]:3}"
+                        fi
                     fi
                 fi
                 JOBSBODY[$nr]=1
@@ -163,19 +175,30 @@ jobs_row_add() {
     ROWIDX=$(( ${#JR[@]} - 1 ))
 }
 
-# regenerated [jobs] body: row-major, column-aligned (spreadsheet-pasteable)
+# regenerated [jobs] body: row-major, column-aligned (spreadsheet-pasteable).
+# Rows whose (src,tree) carries an attribute tail get the dest column padded
+# so the tails line up; tail-less rows keep the bare 3-column shape (no
+# trailing whitespace).
 jobs_emit_body() {
-    local sw=6 tw=4 r c s t
+    local sw=6 tw=4 dw=0 r c s t
     for r in "${JR[@]}"; do
         s="${r%%$'\t'*}"; t="${r#*$'\t'}"
         (( ${#s} > sw )) && sw=${#s}
         (( ${#t} > tw )) && tw=${#t}
     done
+    for c in "${JC[@]}"; do
+        (( ${#c} > dw )) && dw=${#c}
+    done
     for r in "${JR[@]}"; do
         s="${r%%$'\t'*}"; t="${r#*$'\t'}"
         for c in "${JC[@]}"; do
             if [[ -n "${CELL[$s|$t|$c]:-}" ]]; then
-                printf '%-*s   %-*s   %s\n' "$sw" "$s" "$tw" "$t" "$c"
+                if [[ -n "${ROWEXTRA[$s|$t]:-}" ]]; then
+                    printf '%-*s   %-*s   %-*s   %s\n' \
+                        "$sw" "$s" "$tw" "$t" "$dw" "$c" "${ROWEXTRA[$s|$t]}"
+                else
+                    printf '%-*s   %-*s   %s\n' "$sw" "$s" "$tw" "$t" "$c"
+                fi
             fi
         done
     done
@@ -496,6 +519,9 @@ do_del_row() {
     for c in "${JC[@]}"; do
         unset "CELL[$s|$t|$c]" 2>/dev/null || true
     done
+    # drop the attribute tail too: a later re-add of the same (src,tree)
+    # must not resurrect a stale snaps= from this session
+    unset "ROWEXTRA[$s|$t]" 2>/dev/null || true
     local keep=() r
     for r in "${JR[@]}"; do
         [[ "$r" == "$s"$'\t'"$t" ]] && continue

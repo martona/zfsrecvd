@@ -107,8 +107,11 @@ END {
         for (i = 1; i <= rn; i++) printf fmt, rid[i], rnet[i], rpr[i], rav[i]
     }
 
-    # sources table: per-tree used / avail
-    sn = 0; line = rline[r]
+    # sources table: per-tree used / avail, plus the snaps-budget column
+    # when any tree carries one (footprint/budget; "(pruned N)" when the
+    # budget pass destroyed anything). Records without snap fields render
+    # exactly as before -- add-only jsonl, add-only rendering.
+    sn = 0; line = rline[r]; anysb = 0
     while (match(line, "\\{\"id\":\"[^\"]*\",\"tree\":[^}]*\\}")) {
         rec = substr(line, RSTART, RLENGTH); line = substr(line, RSTART + RLENGTH)
         sn++
@@ -116,6 +119,13 @@ END {
         str[sn] = g(rec, "tree")
         sus[sn] = h(g(rec, "used") + 0)
         sav[sn] = h(g(rec, "avail") + 0)
+        sfp[sn] = ""; spn[sn] = 0; sfl[sn] = 0
+        if (g(rec, "snapfp") != "") {
+            anysb = 1
+            sfp[sn] = h(g(rec, "snapfp") + 0) "/" h(g(rec, "snapbudget") + 0)
+            spn[sn] = g(rec, "snappruned") + 0
+            sfl[sn] = (g(rec, "snapstate") == "floor" ? 1 : 0)
+        }
     }
     if (sn > 0) {
         w1 = length("source"); w2 = length("tree"); w3 = length("used"); w4 = length("avail")
@@ -123,10 +133,25 @@ END {
             w1 = wmax(w1, sid[i]);  w2 = wmax(w2, str[i])
             w3 = wmax(w3, sus[i]);  w4 = wmax(w4, sav[i])
         }
-        fmt = "  %-" w1 "s  %-" w2 "s  %" w3 "s  %" w4 "s\n"
         print ""
-        printf fmt, "source", "tree", "used", "avail"
-        for (i = 1; i <= sn; i++) printf fmt, sid[i], str[i], sus[i], sav[i]
+        if (anysb) {
+            w5 = length("snaps")
+            for (i = 1; i <= sn; i++) {
+                sc[i] = (sfp[i] != "" ? sfp[i] : "-")
+                if (spn[i] > 0) sc[i] = sc[i] " (pruned " spn[i] ")"
+                w5 = wmax(w5, sc[i])
+            }
+            fmt = "  %-" w1 "s  %-" w2 "s  %" w3 "s  %" w4 "s  %" w5 "s\n"
+            printf fmt, "source", "tree", "used", "avail", "snaps"
+            for (i = 1; i <= sn; i++) printf fmt, sid[i], str[i], sus[i], sav[i], sc[i]
+        } else {
+            fmt = "  %-" w1 "s  %-" w2 "s  %" w3 "s  %" w4 "s\n"
+            printf fmt, "source", "tree", "used", "avail"
+            for (i = 1; i <= sn; i++) printf fmt, sid[i], str[i], sus[i], sav[i]
+        }
+        for (i = 1; i <= sn; i++) if (sfl[i])
+            printf "  SNAPS-FLOOR  [%s] %s: %s pinned with only newest snapshots left -- raise snaps= or accept it\n", \
+                sid[i], str[i], sfp[i]
     }
 
     # gc findings (fleetrun harvests gc.sh stdout per receiver into the

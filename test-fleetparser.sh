@@ -79,7 +79,7 @@ expect_fatal badsection '[foo]
 x' 1 "unknown section"
 
 expect_fatal badcols '[jobs]
-jupiter bergamo' 2 "3 columns"
+jupiter bergamo' 2 "source tree dest"
 
 expect_fatal selfjob '[hosts]
 a recv=t/r
@@ -139,6 +139,73 @@ o=$(bash -c "source '$FP'; fleet_parse '$FX/gcd.conf'; echo \"gcd=\$fleet_opt_gc
 grep -q "gcd=on" <<<"$o" && ok "gc-destroy on parses" || bad "gc-destroy on: $o"
 o=$(bash -c "source '$FP'; fleet_parse '$FX/good.conf'; echo \"gcd=\$fleet_opt_gc_destroy\"" 2>&1)
 grep -q "gcd=off" <<<"$o" && ok "gc-destroy defaults off" || bad "gc-destroy default: $o"
+
+# ---- snaps= sender budgets (job-row tail + [options] default) ----------
+cat > "$FX/snaps.conf" <<'EOF'
+[options]
+snaps 10%
+
+[hosts]
+b recv=t/r
+c recv=t/r
+
+[jobs]
+zeus   rust/vm   b   snaps=1T
+zeus   rust/vm   c   snaps=1T
+odin   rpool     b
+cp4    scratch   b   snaps=off
+EOF
+o=$(bash -c "source '$FP'; fleet_parse '$FX/snaps.conf';
+    echo \"opt=\$fleet_opt_snaps\";
+    echo \"row=[\$(fleet_snaps zeus rust/vm)] def=[\$(fleet_snaps odin rpool)] off=[\$(fleet_snaps cp4 scratch)]\";
+    echo \"jobs=\${#fleet_job_src[@]}\"" 2>&1)
+rc=$?
+[[ $rc -eq 0 ]] && ok "snaps.conf parses (rc=0)" || { bad "snaps.conf rc=$rc"; echo "$o"; }
+grep -q "opt=10%" <<<"$o" && ok "[options] snaps stored" || bad "opt snaps: $o"
+grep -q "row=\[1T\] def=\[10%\] off=\[\]" <<<"$o" && ok "fleet_snaps: row wins, default falls through, off empties" || bad "fleet_snaps: $o"
+grep -q "jobs=4" <<<"$o" && ok "tailed rows still count as jobs" || bad "tailed jobs: $o"
+
+# no [options] default: absent rows have no budget at all
+printf '[hosts]\nb recv=t/r\n[jobs]\na t b\n' > "$FX/snapsnone.conf"
+o=$(bash -c "source '$FP'; fleet_parse '$FX/snapsnone.conf'; echo \"none=[\$(fleet_snaps a t)]\"" 2>&1)
+grep -q "none=\[\]" <<<"$o" && ok "no default, no row -> no budget" || bad "snaps none: $o"
+
+# snaps=off as the fleet default disables everywhere
+printf '[options]\nsnaps off\n[hosts]\nb recv=t/r\n[jobs]\na t b\n' > "$FX/snapsoffdef.conf"
+o=$(bash -c "source '$FP'; fleet_parse '$FX/snapsoffdef.conf'; echo \"offdef=[\$(fleet_snaps a t)]\"" 2>&1)
+grep -q "offdef=\[\]" <<<"$o" && ok "snaps off default -> no budget" || bad "snaps off default: $o"
+
+expect_fatal badsnapsval '[hosts]
+b recv=t/r
+[jobs]
+a tree b snaps=1000' 4 "bad snaps budget"
+
+expect_fatal badsnapspct '[hosts]
+b recv=t/r
+[jobs]
+a tree b snaps=250%' 4 "snaps percent must be 1-100"
+
+expect_fatal badsnapsopt '[options]
+snaps lots' 2 "bad snaps budget"
+
+expect_fatal snapsdisagree '[hosts]
+b recv=t/r
+c recv=t/r
+[jobs]
+a tree b snaps=1T
+a tree c snaps=2T' 6 "snaps= disagrees"
+
+expect_fatal snapsabsent '[hosts]
+b recv=t/r
+c recv=t/r
+[jobs]
+a tree b snaps=1T
+a tree c' 6 "snaps= disagrees"
+
+expect_fatal badjobattr '[hosts]
+b recv=t/r
+[jobs]
+a tree b frobnicate=9' 4 "unknown job attribute"
 
 echo "=== RESULT: $PASS passed, $FAIL failed ==="
 [[ $FAIL -eq 0 ]]

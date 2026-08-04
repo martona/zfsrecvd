@@ -128,6 +128,129 @@ prune_local() {
                 || echo "WARNING: failed to prune old local snapshot: ${list[i]}" >&2
         done
     done
+    prune_budget
+}
+
+# ---- sender snapshot budget (fleet.conf snaps=; PROTOCOL.md §28) ------------
+# Runs after the count prune. If [snaps-budget] names this tree, measure
+# what the tree's prunable-prefix snapshots pin -- a per-dataset dry-run
+# destroy over EXACTLY our snaps, so shared blocks are counted honestly
+# and user snapshots are invisible (user objects, same standing as
+# datasets) -- then destroy globally-oldest eligible snaps until the
+# budget holds. Floor: each dataset's newest prunable snap survives
+# unconditionally (catch-up past it rides the cursor bookmark, but the
+# frontier stays). Never blocks or fails a run: over-budget-at-floor is
+# a loud warning plus a ledger state, nothing more.
+
+snaps_hum() {   # bytes -> human, zfs-style binary units
+    awk -v b="$1" 'BEGIN{ n = split("B K M G T P", u, " "); i = 1
+        while (b >= 1024 && i < n) { b /= 1024; i++ }
+        printf (i == 1 ? "%d%s" : "%.1f%s"), b, u[i] }'
+}
+
+snaps_fp() {    # $1 dataset, $2 space-joined full snap names -> pinned bytes
+    local names="" s
+    for s in $2; do names="${names:+$names,}${s#*@}"; done
+    [[ -z "$names" ]] && { echo 0; return 0; }
+    zfs destroy -nvp "$1@$names" 2>/dev/null \
+        | awk '$1 == "reclaim" { print $2; exit }'
+}
+
+prune_budget() {
+    local row braw=""
+    for row in "${snapsbudget[@]}"; do
+        [[ "${row%%[[:space:]]*}" == "$root" ]] && braw="${row##*[[:space:]]}"
+    done
+    [[ -z "$braw" ]] && return 0
+    # the run conf is generated, but re-validate before doing arithmetic
+    # on it -- a hand-mangled value must not kill the prune pass
+    if ! [[ "$braw" =~ ^([0-9]+(\.[0-9]+)?[KMGTP]|[0-9]+%)$ ]]; then
+        echo "WARNING: ignoring bad snaps-budget value '$braw' for $root" >&2
+        return 0
+    fi
+    # resolve the budget to bytes; % is of the tree root's used+avail
+    # (self-scaling, and it respects any quota enclosing the tree)
+    local budget vals tu ta
+    if [[ "$braw" == *% ]]; then
+        vals=$(zfs get -Hp -o value used,avail "$root" 2>/dev/null) || return 0
+        tu=$(sed -n 1p <<<"$vals"); ta=$(sed -n 2p <<<"$vals")
+        [[ "$tu" =~ ^[0-9]+$ && "$ta" =~ ^[0-9]+$ ]] || return 0
+        budget=$(( (tu + ta) / 100 * ${braw%\%} ))
+    else
+        budget=$(awk -v n="${braw%[KMGTP]}" -v u="${braw##*[0-9.]}" 'BEGIN{
+            m["K"]=1024; m["M"]=1048576; m["G"]=1073741824
+            m["T"]=1099511627776; m["P"]=1125899906842624
+            printf "%.0f", n * m[u] }')
+    fi
+    # gather prunable snaps fresh (the count prune just ran), same
+    # eligibility gate as prune_local; zfs list -s creation is globally
+    # creation-ordered, so gorder doubles as the destroy order
+    local snap ds name prefix matched fp s2
+    declare -A bsn=() dsfp=() newest=()
+    local border=() gorder=()
+    while IFS= read -r snap; do
+        ds="${snap%@*}"
+        name="${snap#*@}"
+        [[ -n "$prune_all" || -n "${ok_ds[$ds]:-}" ]] || continue
+        matched=""
+        for prefix in "${prune_prefixes[@]}"; do
+            if [[ "$name" == "$prefix"* ]]; then
+                matched=1
+                break
+            fi
+        done
+        [[ -n "$matched" ]] || continue
+        [[ -z "${bsn[$ds]:-}" ]] && border+=( "$ds" )
+        bsn[$ds]="${bsn[$ds]:-}${bsn[$ds]:+ }$snap"
+        gorder+=( "$snap" )
+    done < <(
+        if [[ -n "$single" ]]; then
+            zfs list -H -t snapshot -s creation -d 1 -o name "$root" 2>/dev/null
+        else
+            zfs list -H -r -t snapshot -s creation -o name "$root" 2>/dev/null
+        fi || true
+    )
+    (( ${#gorder[@]} > 0 )) || return 0
+    local total=0
+    for ds in "${border[@]}"; do
+        fp=$(snaps_fp "$ds" "${bsn[$ds]}") || fp=0
+        [[ "$fp" =~ ^[0-9]+$ ]] || fp=0
+        dsfp[$ds]=$fp
+        total=$(( total + fp ))
+    done
+    local state=ok pruned=0 before=$total
+    if (( total > budget )); then
+        echo "snaps budget on $root: $(snaps_hum "$total") pinned > $braw ($(snaps_hum "$budget")) -- pruning oldest" >&2
+        for ds in "${border[@]}"; do
+            newest[${bsn[$ds]##* }]=1
+        done
+        for snap in "${gorder[@]}"; do
+            (( total <= budget )) && break
+            [[ -n "${newest[$snap]:-}" ]] && continue
+            ds="${snap%@*}"
+            echo "pruning $snap (snaps budget)" >&2
+            zfs destroy "$snap" 2>/dev/null \
+                || { echo "WARNING: failed to prune $snap" >&2; continue; }
+            pruned=$(( pruned + 1 ))
+            # global oldest-first means the victim is always the current
+            # head of its dataset's list
+            s2="${bsn[$ds]#"$snap"}"
+            bsn[$ds]="${s2# }"
+            fp=$(snaps_fp "$ds" "${bsn[$ds]}") || fp=0
+            [[ "$fp" =~ ^[0-9]+$ ]] || fp=0
+            total=$(( total - dsfp[$ds] + fp ))
+            dsfp[$ds]=$fp
+        done
+        if (( total > budget )); then
+            state=floor
+            echo "WARNING: snaps budget on $root: $(snaps_hum "$total") still pinned with only newest snapshots left (budget $braw)" >&2
+        else
+            echo "snaps budget on $root: freed $(snaps_hum $(( before - total ))), now $(snaps_hum "$total") / $(snaps_hum "$budget")" >&2
+        fi
+    fi
+    # ledger for the run report (fleetrun harvests <bundle>/snaps.report);
+    # written even when healthy -- quiet-when-healthy is the report's call
+    echo "$root $total $budget $pruned $state" >> "$cert_dir/snaps.report" 2>/dev/null || true
 }
 
 if [[ -n "$prune_only" ]]; then

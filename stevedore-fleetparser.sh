@@ -10,29 +10,40 @@
 #
 # Globals:
 #   fleet_opt_user fleet_opt_port fleet_opt_workers fleet_opt_transport
-#   fleet_opt_gc_destroy                        [options] w/ defaults
+#   fleet_opt_gc_destroy fleet_opt_snaps        [options] w/ defaults
 #   fleet_ret_source fleet_ret_destination     raw bucket strings, reserved for D
 #   fleet_host_ssh[] _data[] _recv[] _ec2[] _bind[] _cadence[]   assoc by identity, sparse
 #   fleet_job_src[] fleet_job_tree[] fleet_job_dest[]   parallel arrays, one row per job
+#   fleet_job_snaps[]   assoc by "src|tree": raw snaps= budget from job rows
+#                       (consistent across a (src,tree)'s rows -- parse-fatal
+#                       otherwise), sparse
 #   fleet_sources[] fleet_receivers[] fleet_participants[]   derived, deduped,
 #                                                            first-seen order
 # Helpers:
 #   fleet_ssh_dest <id>  -> user@addr for ssh (defaults applied)
 #   fleet_data <id>      -> data-plane dial name (defaults to the identity)
+#   fleet_snaps <src> <tree> -> effective sender snaps budget ("" = none):
+#                       row snaps= wins over [options] snaps; off -> ""
 
 FLEET_RE_IDENT='^[A-Za-z0-9._-]+$'
 FLEET_RE_TREE='^[A-Za-z0-9._][A-Za-z0-9._/-]*$'
 FLEET_RE_NUM='^[0-9]+$'
+# snaps budget: absolute with a mandatory unit (1T, 500G, 1.5T), percent
+# of the tree root's used+avail (10%), or off. A bare number is rejected
+# on purpose -- "snaps=1000" reading as bytes is a foot-gun.
+FLEET_RE_SNAPS='^([0-9]+(\.[0-9]+)?[KMGTP]|[0-9]+%|off)$'
 
 fleet_opt_user=""
 fleet_opt_port=""
 fleet_opt_workers=""
 fleet_opt_transport=""
 fleet_opt_gc_destroy=""
+fleet_opt_snaps=""
 fleet_ret_source=""
 fleet_ret_destination=""
 declare -A fleet_host_ssh fleet_host_data fleet_host_recv fleet_host_ec2 fleet_host_bind fleet_host_cadence
 declare -A _fleet_host_seen _fleet_job_seen
+declare -A fleet_job_snaps _fleet_snaps_seen   # keyed "src|tree"
 fleet_job_src=()
 fleet_job_tree=()
 fleet_job_dest=()
@@ -44,6 +55,14 @@ fleet_participants=()
 _fleet_fatal() {
     echo "${cfg}:${nr}: $*" >&2
     exit 78
+}
+
+# percent budgets must be 1-100; the regex alone would take 250%.
+_fleet_snaps_pct_ok() {
+    if [[ "$1" == *% ]]; then
+        local p="${1%\%}"
+        (( p >= 1 && p <= 100 )) || _fleet_fatal "snaps percent must be 1-100, got '$1'"
+    fi
 }
 
 _fleet_opt_line() {
@@ -61,6 +80,10 @@ _fleet_opt_line() {
         gc-destroy) [[ "$2" == "on" || "$2" == "off" ]] \
                      || _fleet_fatal "gc-destroy must be 'on' or 'off'"
                  fleet_opt_gc_destroy="$2" ;;
+        snaps)   [[ "$2" =~ $FLEET_RE_SNAPS ]] \
+                     || _fleet_fatal "bad snaps budget '$2' (want <N><K|M|G|T|P>, <N>%, or off)"
+                 _fleet_snaps_pct_ok "$2"
+                 fleet_opt_snaps="$2" ;;
         *)       _fleet_fatal "unknown option '$1'" ;;
     esac
 }
@@ -117,18 +140,37 @@ _fleet_host_line() {
 }
 
 _fleet_job_line() {
-    if (( $# != 3 )); then
-        local w
-        for w in "$@"; do
-            [[ "$w" == via=* ]] && _fleet_fatal "via= is reserved for the relay phase (R); not supported yet"
-        done
-        _fleet_fatal "job rows are 'source tree dest' (exactly 3 columns)"
-    fi
+    (( $# >= 3 )) || _fleet_fatal "job rows are 'source tree dest [key=value ...]'"
     local s="$1" t="$2" d="$3"
     [[ "$s" =~ $FLEET_RE_IDENT ]] || _fleet_fatal "bad source '$s'"
     [[ "$t" =~ $FLEET_RE_TREE ]]  || _fleet_fatal "bad tree '$t'"
     [[ "$d" =~ $FLEET_RE_IDENT ]] || _fleet_fatal "bad dest '$d'"
     [[ "$s" == "$d" ]] && _fleet_fatal "source == dest for tree '$t'"
+    # attribute tail: key=value words after the 3 positional columns
+    shift 3
+    local kv snaps=""
+    for kv in "$@"; do
+        case "$kv" in
+            via=*)   _fleet_fatal "via= is reserved for the relay phase (R); not supported yet" ;;
+            snaps=*) snaps="${kv#*=}"
+                     [[ "$snaps" =~ $FLEET_RE_SNAPS ]] \
+                         || _fleet_fatal "bad snaps budget '$snaps' (want <N><K|M|G|T|P>, <N>%, or off)"
+                     _fleet_snaps_pct_ok "$snaps" ;;
+            *)       _fleet_fatal "unknown job attribute '$kv' (job rows are 'source tree dest [key=value ...]')" ;;
+        esac
+    done
+    # snaps= is a per-(source,tree) fact carried on per-(source,tree,dest)
+    # rows: every row of the same (source,tree) must agree -- including
+    # agreeing on absence. Silent last-wins would let a hand-edit change
+    # one row and quietly not mean what it says.
+    local skey="$s|$t"
+    if [[ -n "${_fleet_snaps_seen[$skey]:-}" ]]; then
+        [[ "${fleet_job_snaps[$skey]:-}" == "$snaps" ]] \
+            || _fleet_fatal "snaps= disagrees across rows of '$s $t' ('${fleet_job_snaps[$skey]:-<none>}' vs '${snaps:-<none>}')"
+    else
+        _fleet_snaps_seen[$skey]=1
+        [[ -n "$snaps" ]] && fleet_job_snaps[$skey]="$snaps"
+    fi
     local key="$s|$t|$d"
     [[ -n "${_fleet_job_seen[$key]:-}" ]] && _fleet_fatal "duplicate job: $s $t $d"
     _fleet_job_seen[$key]=1
@@ -228,6 +270,18 @@ fleet_ssh_dest() {
 
 fleet_data() {
     printf '%s\n' "${fleet_host_data[$1]:-$1}"
+}
+
+# fleet_snaps <src> <tree> -> effective sender snaps budget, "" when none.
+# Row-level snaps= beats the [options] snaps default; a stored "off"
+# (row or default) means explicitly no budget.
+fleet_snaps() {
+    local v="${fleet_job_snaps[$1|$2]:-$fleet_opt_snaps}"
+    if [[ "$v" == "off" ]]; then
+        printf '\n'
+    else
+        printf '%s\n' "$v"
+    fi
 }
 
 # fleet_cadence_secs <id> -> cadence in seconds, or "" when unset.

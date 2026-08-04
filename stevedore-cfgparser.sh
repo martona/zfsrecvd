@@ -14,6 +14,9 @@
 #   * transport      (string: socat | haproxy)
 #   * tunnels        (bash array: "dial localport" rows, haproxy senders)
 #   * retain_spec    (string: retention grid, e.g. "hourly=48 daily=30")
+#   * snapsbudget    (bash array: "tree value" rows -- sender snapshot
+#                     budgets, value = <N><K|M|G|T|P> or <N>%; generated
+#                     by fleetrun from fleet.conf snaps=)
 
 source "$(dirname "${BASH_SOURCE[0]}")/stevedore-paths.sh"
 
@@ -21,7 +24,7 @@ CFG="${STEVEDORE_CONF:-$STEVE_ETC/stevedore.conf}"
 
 recv_root="" tcp_port="" tcp_addr="" keep_count="" cert_dir="" allowed_hosts=()
 sends=() prune_prefixes=() orchtargets=() orchjobs=() orchec2up=() orchworkers=""
-transport="" tunnels=() retain_spec=""
+transport="" tunnels=() retain_spec="" snapsbudget=()
 
 current=""
 while IFS= read -r line || [[ -n "$line" ]]; do
@@ -49,6 +52,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
         transport)             transport="$line" ;;
         tunnel)                tunnels+=( "$line" ) ;;
         retain)                retain_spec="$line" ;;
+        snaps-budget)          snapsbudget+=( "$line" ) ;;
         orchestrator-ec2up)    orchec2up+=( "$line" ) ;;
     esac
 done < "$CFG"

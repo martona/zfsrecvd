@@ -499,6 +499,29 @@ gen_run_conf() {   # $1 = host identity -> writes $rundir/bundle-$1/run.conf
         fi
         printf '[keep-count]\n%s\n' "$kc"
         printf '[prune-prefixes]\nstevedore-\n'
+        # sender snapshot budgets (fleet.conf snaps= / [options] snaps):
+        # one row per (this source, tree). Raw value travels as written --
+        # a percent only becomes bytes on the sender, where the tree's
+        # used+avail is measurable.
+        if is_source "$id"; then
+            local bi bt bv bhdr=""
+            declare -A bseen=()
+            for (( bi = 0; bi < ${#fleet_job_src[@]}; bi++ )); do
+                if [[ "${fleet_job_src[bi]}" == "$id" ]]; then
+                    bt="${fleet_job_tree[bi]}"
+                    [[ -n "${bseen[$bt]:-}" ]] && continue
+                    bseen[$bt]=1
+                    bv=$(fleet_snaps "$id" "$bt")
+                    if [[ -n "$bv" ]]; then
+                        if [[ -z "$bhdr" ]]; then
+                            bhdr=1
+                            printf '[snaps-budget]\n'
+                        fi
+                        printf '%s %s\n' "$bt" "$bv"
+                    fi
+                fi
+            done
+        fi
         # No [sends] since T: the orchestrator drives sendtree per job row
         # (PROTOCOL.md §19); this conf carries host-scoped settings only.
         local i d
@@ -876,6 +899,9 @@ for h in "${fleet_sources[@]}"; do
     if [[ -n "${prov_failed[$h]:-}" ]]; then
         continue
     fi
+    # sender snaps-budget ledger, one fetch per source; a line per tree:
+    # "tree footprint budget pruned ok|floor" (sendtree prune_budget)
+    sb=$(fleet_ssh "$(fleet_ssh_dest "$h")" "sudo -n cat $RUN_REMOTE_BASE/$h/snaps.report 2>/dev/null || true" </dev/null 2>/dev/null) || sb=""
     declare -A sseen=()
     for (( i = 0; i < ${#fleet_job_src[@]}; i++ )); do
         if [[ "${fleet_job_src[i]}" != "$h" || -n "${sseen[${fleet_job_tree[i]}]:-}" ]]; then
@@ -886,8 +912,18 @@ for h in "${fleet_sources[@]}"; do
         vals=$(fleet_ssh "$(fleet_ssh_dest "$h")" "zfs get -Hp -o value used,avail $s_tree" </dev/null 2>/dev/null) || vals=""
         s_used=$(sed -n 1p <<<"$vals")
         s_avail=$(sed -n 2p <<<"$vals")
+        s_extra=""
+        sline=$(awk -v t="$s_tree" '$1 == t { print; exit }' <<<"$sb")
+        if [[ -n "$sline" ]]; then
+            read -r _ sb_fp sb_bud sb_pr sb_state <<<"$sline"
+            [[ "$sb_state" == "floor" ]] || sb_state="ok"
+            [[ "$sb_pr" =~ ^[0-9]+$ ]] || sb_pr=0
+            if [[ "$sb_fp" =~ ^[0-9]+$ && "$sb_bud" =~ ^[0-9]+$ ]]; then
+                s_extra=",\"snapfp\":$sb_fp,\"snapbudget\":$sb_bud,\"snappruned\":$sb_pr,\"snapstate\":\"$sb_state\""
+            fi
+        fi
         if [[ "$s_used" =~ ^[0-9]+$ ]]; then
-            src_json="${src_json}${src_json:+,}{\"id\":\"$h\",\"tree\":\"$s_tree\",\"used\":$s_used,\"avail\":${s_avail:-0}}"
+            src_json="${src_json}${src_json:+,}{\"id\":\"$h\",\"tree\":\"$s_tree\",\"used\":$s_used,\"avail\":${s_avail:-0}$s_extra}"
         fi
     done
     unset sseen

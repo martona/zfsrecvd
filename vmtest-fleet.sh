@@ -501,10 +501,50 @@ check "T20 doomed2 reclaimed by the run" bash -c "! sudo zfs list -H ztest/recv/
 grep -q "doomed2: DESTROYED" /tmp/fleet19.log && ok "T20 destroy in run output" || { bad "T20 run output"; grep -a DESTROY /tmp/fleet19.log | head -3; }
 grep -qF 'DESTROYED' "$RJ" && ok "T20 destroys ride the jsonl gc harvest" || { bad "T20 jsonl"; tail -n 1 "$RJ"; }
 
+echo "=== T21: sender snaps= budget: tighter-of wins, floor holds ==="
+# (a) end-to-end: snaps=3M on the job rows must reach the sender bundle
+# as [snaps-budget], and prune-post must destroy oldest prunable snaps
+# beyond what keep-count (24, so count-prune is a no-op here) would ever
+# touch -- tighter-of-budget-and-retention. Churn the zvol so old snaps
+# pin real bytes, and wait out the minute so the run mints a new snap.
+sudo dd if=/dev/urandom of=/dev/zvol/ztest/src/vol bs=1M count=4 oflag=direct 2>/dev/null
+last_min=$(date +%H%M)
+for _ in $(seq 1 130); do [ "$(date +%H%M)" != "$last_min" ] && break; sleep 1; done
+sed "s|^\($CN .*ztest/src.*\)\$|\1   snaps=3M|" ~/fleet-test.conf > ~/fleet-snaps.conf
+n_before=$(sudo zfs list -H -t snapshot -d 1 -o name ztest/src | grep -c stevedore-)
+/usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-snaps.conf >/tmp/fleet20.log 2>&1
+rc=$?
+check "T21 budget run rc=0" test "$rc" -eq 0
+grep -q "(snaps budget)" /tmp/fleet20.log && ok "T21 budget prune fired" || { bad "T21 no budget prune"; grep -a "snaps" /tmp/fleet20.log | head -5; }
+grep -q "snaps budget on ztest/src:" /tmp/fleet20.log && ok "T21 budget summary line" || { bad "T21 summary"; grep -a "budget" /tmp/fleet20.log | head -5; }
+n_after=$(sudo zfs list -H -t snapshot -d 1 -o name ztest/src | grep -c stevedore-)
+check "T21 newest snapshot survived (got $n_after)" test "$n_after" -ge 1
+tail -n 1 "$RJ" | grep -q '"snapfp":' && ok "T21 footprint in the run record" || { bad "T21 jsonl snapfp"; tail -n 1 "$RJ"; }
+tail -n 1 "$RJ" | grep -q '"snapstate":"ok"' && ok "T21 run record state ok" || { bad "T21 jsonl state"; tail -n 1 "$RJ"; }
+# (b) floor: churn again so the NEWEST snap pins ~4M, then a direct
+# prune-only pass with a 1K budget. Nothing but the newest remains and
+# it may not be destroyed -- state floor, loud warning, ledger line.
+sudo dd if=/dev/urandom of=/dev/zvol/ztest/src/vol bs=1M count=4 oflag=direct 2>/dev/null
+mkdir -p /tmp/t21
+cat > /tmp/t21/run.conf <<'EOF'
+[cert-dir]
+/tmp/t21
+[snaps-budget]
+ztest/src 1K
+EOF
+out=$(sudo env STEVEDORE_CONF=/tmp/t21/run.conf /usr/local/lib/stevedore/stevedore-sendtree.sh --prune-only ztest/src 2>&1)
+rc=$?
+check "T21 prune-only rc=0 at floor" test "$rc" -eq 0
+grep -q "WARNING: snaps budget on ztest/src:.*only newest snapshots left" <<<"$out" && ok "T21 floor warned loudly" || { bad "T21 floor warning"; echo "$out" | tail -5; }
+n_floor=$(sudo zfs list -H -t snapshot -d 1 -o name ztest/src | grep -c stevedore-)
+check "T21 floor kept exactly the newest (got $n_floor)" test "$n_floor" = "1"
+grep -q "^ztest/src .* floor$" /tmp/t21/snaps.report && ok "T21 ledger records floor" || { bad "T21 ledger"; cat /tmp/t21/snaps.report 2>/dev/null; }
+sudo rm -rf /tmp/t21 ~/fleet-snaps.conf
+
 echo
 echo "=== RESULT: $PASS passed, $FAIL failed ==="
 if [ "$FAIL" -gt 0 ]; then
-    for f in /tmp/fleet1.log /tmp/fleet2.log /tmp/fleet3.log /tmp/fleet4.log /tmp/fleet5.log /tmp/fleet6.log /tmp/fleet7.log /tmp/fleet8.log /tmp/fleet9.log /tmp/fleet10.log /tmp/fleet11.log /tmp/fleet12.log /tmp/fleet13.log /tmp/fleet14.log /tmp/fleet15.log /tmp/fleet16.log /tmp/fleet17.log /tmp/fleet18.log; do
+    for f in /tmp/fleet1.log /tmp/fleet2.log /tmp/fleet3.log /tmp/fleet4.log /tmp/fleet5.log /tmp/fleet6.log /tmp/fleet7.log /tmp/fleet8.log /tmp/fleet9.log /tmp/fleet10.log /tmp/fleet11.log /tmp/fleet12.log /tmp/fleet13.log /tmp/fleet14.log /tmp/fleet15.log /tmp/fleet16.log /tmp/fleet17.log /tmp/fleet18.log /tmp/fleet19.log /tmp/fleet20.log; do
         [ -f "$f" ] && { echo "--- $f tail ---"; tail -n 25 "$f"; }
     done
     for u in stevedore-run-vmrecv stevedore-run-vmrecv2 stevedore-ha-vmrecv stevedore-ha-vmrecv2; do

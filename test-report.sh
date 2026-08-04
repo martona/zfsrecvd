@@ -63,5 +63,25 @@ grep -q "  gc \[" <<<"$out2" && bad "gc section on gc-less record" || ok "no gc 
 grep -q "within cadence" <<<"$out2" && bad "cadence suffix on cadence-less run" || ok "no cadence suffix when none"
 grep -q "ec2 skipped" <<<"$out2" && bad "ec2-skipped suffix on skip-less run" || ok "no ec2-skipped suffix when none"
 
+# snaps-budget rendering: the snaps column appears only when a src record
+# carries snapfp; floor state gets its own loud line
+grep -q "SNAPS-FLOOR" <<<"$out" && bad "floor line on budget-less history" || ok "no floor line when no budgets"
+cat > "$FX/snaps.jsonl" <<'EOF'
+{"ts":"2026-08-02T01:01:00Z","kind":"run","run":"run-S","rc":0,"recv":[{"id":"berg","before":0,"after":1024,"avail":2048,"pruned":0}],"src":[{"id":"jup","tree":"tank/a","used":123456,"avail":777777,"snapfp":1073741824,"snapbudget":10737418240,"snappruned":0,"snapstate":"ok"},{"id":"jup","tree":"tank/b","used":1000,"avail":2000,"snapfp":5368709120,"snapbudget":4294967296,"snappruned":7,"snapstate":"floor"},{"id":"odin","tree":"rpool","used":2048,"avail":4096}]}
+EOF
+out3=$(bash "$HERE/stevedore-report.sh" -f "$FX/snaps.jsonl" 2>&1)
+rc=$?
+[[ $rc -eq 0 ]] && ok "snaps fixture renders rc=0" || { bad "snaps rc=$rc"; echo "$out3"; }
+grep -qx "  source  tree      used   avail                 snaps" <<<"$out3" \
+    && ok "source header grows the snaps column" || bad "snaps hdr: $out3"
+grep -qx "  jup     tank/a  120.6K  759.5K            1.0G/10.0G" <<<"$out3" \
+    && ok "healthy budget row aligned" || bad "snaps ok row: $out3"
+grep -qx "  jup     tank/b   1000B    2.0K  5.0G/4.0G (pruned 7)" <<<"$out3" \
+    && ok "floor row shows pruned count" || bad "snaps floor row: $out3"
+grep -qx "  odin    rpool     2.0K    4.0K                     -" <<<"$out3" \
+    && ok "budget-less tree dashes the column" || bad "snaps dash row: $out3"
+grep -q "SNAPS-FLOOR  \[jup\] tank/b: 5.0G/4.0G pinned" <<<"$out3" \
+    && ok "floor warning line" || bad "floor line: $out3"
+
 echo "=== RESULT: $PASS passed, $FAIL failed ==="
 [[ $FAIL -eq 0 ]]
