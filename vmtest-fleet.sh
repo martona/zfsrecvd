@@ -90,7 +90,13 @@ echo "=== T1: --check plan ==="
 out=$(/usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-test.conf --check 2>&1)
 rc=$?
 check "T1 check rc=0" test "$rc" -eq 0
-grep -q "2 jobs, sources: $CN, receivers: vmrecv vmrecv2" <<<"$out" && ok "T1 plan content" || { bad "T1 plan content"; echo "$out"; }
+if grep -q "fleet plan: 2 jobs" <<<"$out" \
+   && grep -q "fleet plan: sources:   $CN\$" <<<"$out" \
+   && grep -q "fleet plan: receivers: vmrecv vmrecv2\$" <<<"$out"; then
+    ok "T1 plan content (one line per role)"
+else
+    bad "T1 plan content"; echo "$out"
+fi
 
 echo "=== T2: bad config rejected ==="
 sed 's/vmrecv$/vmrcev/' ~/fleet-test.conf > ~/fleet-bad.conf

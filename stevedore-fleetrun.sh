@@ -365,7 +365,9 @@ for h in "${fleet_participants[@]}"; do
     fi
 done
 
-echo "fleet plan: ${#fleet_job_src[@]} jobs, sources: ${fleet_sources[*]}, receivers: ${fleet_receivers[*]}" >&2
+echo "fleet plan: ${#fleet_job_src[@]} jobs" >&2
+echo "fleet plan: sources:   ${fleet_sources[*]}" >&2
+echo "fleet plan: receivers: ${fleet_receivers[*]}" >&2
 if [[ ${#wake_ids[@]} -gt 0 ]]; then
     echo "fleet plan: EC2 wake set: ${wake_ids[*]}" >&2
 fi
