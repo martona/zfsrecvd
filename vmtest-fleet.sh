@@ -502,7 +502,7 @@ grep -q "doomed2: DESTROYED" /tmp/fleet19.log && ok "T20 destroy in run output" 
 grep -qF 'DESTROYED' "$RJ" && ok "T20 destroys ride the jsonl gc harvest" || { bad "T20 jsonl"; tail -n 1 "$RJ"; }
 
 echo "=== T21: sender snaps= budget: tighter-of wins, floor holds ==="
-# (a) end-to-end: snaps=3M on the job rows must reach the sender bundle
+# (a) end-to-end: a [source-quota] row (3M) must reach the sender bundle
 # as [snaps-budget], and prune-post must destroy oldest prunable snaps
 # beyond what keep-count (24, so count-prune is a no-op here) would ever
 # touch -- tighter-of-budget-and-retention. Churn the zvol so old snaps
@@ -510,7 +510,7 @@ echo "=== T21: sender snaps= budget: tighter-of wins, floor holds ==="
 sudo dd if=/dev/urandom of=/dev/zvol/ztest/src/vol bs=1M count=4 oflag=direct 2>/dev/null
 last_min=$(date +%H%M)
 for _ in $(seq 1 130); do [ "$(date +%H%M)" != "$last_min" ] && break; sleep 1; done
-sed "s|^\($CN .*ztest/src.*\)\$|\1   snaps=3M|" ~/fleet-test.conf > ~/fleet-snaps.conf
+{ cat ~/fleet-test.conf; printf '\n[source-quota]\n%s   ztest/src   3M\n' "$CN"; } > ~/fleet-snaps.conf
 n_before=$(sudo zfs list -H -t snapshot -d 1 -o name ztest/src | grep -c stevedore-)
 /usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-snaps.conf >/tmp/fleet20.log 2>&1
 rc=$?

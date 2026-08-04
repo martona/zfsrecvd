@@ -14,16 +14,17 @@
 #   fleet_ret_source fleet_ret_destination     raw bucket strings, reserved for D
 #   fleet_host_ssh[] _data[] _recv[] _ec2[] _bind[] _cadence[]   assoc by identity, sparse
 #   fleet_job_src[] fleet_job_tree[] fleet_job_dest[]   parallel arrays, one row per job
-#   fleet_job_snaps[]   assoc by "src|tree": raw snaps= budget from job rows
-#                       (consistent across a (src,tree)'s rows -- parse-fatal
-#                       otherwise), sparse
+#   fleet_job_snaps[]   assoc by "src|tree": raw budget from [source-quota]
+#                       rows ('source tree value'; EOF-checked against the
+#                       job rows), sparse
 #   fleet_sources[] fleet_receivers[] fleet_participants[]   derived, deduped,
 #                                                            first-seen order
 # Helpers:
 #   fleet_ssh_dest <id>  -> user@addr for ssh (defaults applied)
 #   fleet_data <id>      -> data-plane dial name (defaults to the identity)
 #   fleet_snaps <src> <tree> -> effective sender snaps budget ("" = none):
-#                       row snaps= wins over [options] snaps; off -> ""
+#                       [source-quota] row wins over the [options]
+#                       source-quota default; off -> ""
 
 FLEET_RE_IDENT='^[A-Za-z0-9._-]+$'
 FLEET_RE_TREE='^[A-Za-z0-9._][A-Za-z0-9._/-]*$'
@@ -80,8 +81,8 @@ _fleet_opt_line() {
         gc-destroy) [[ "$2" == "on" || "$2" == "off" ]] \
                      || _fleet_fatal "gc-destroy must be 'on' or 'off'"
                  fleet_opt_gc_destroy="$2" ;;
-        snaps)   [[ "$2" =~ $FLEET_RE_SNAPS ]] \
-                     || _fleet_fatal "bad snaps budget '$2' (want <N><K|M|G|T|P>, <N>%, or off)"
+        source-quota) [[ "$2" =~ $FLEET_RE_SNAPS ]] \
+                     || _fleet_fatal "bad source-quota '$2' (want <N><K|M|G|T|P>, <N>%, or off)"
                  _fleet_snaps_pct_ok "$2"
                  fleet_opt_snaps="$2" ;;
         *)       _fleet_fatal "unknown option '$1'" ;;
@@ -140,43 +141,50 @@ _fleet_host_line() {
 }
 
 _fleet_job_line() {
-    (( $# >= 3 )) || _fleet_fatal "job rows are 'source tree dest [key=value ...]'"
+    (( $# >= 3 )) || _fleet_fatal "job rows are 'source tree dest'"
     local s="$1" t="$2" d="$3"
     [[ "$s" =~ $FLEET_RE_IDENT ]] || _fleet_fatal "bad source '$s'"
     [[ "$t" =~ $FLEET_RE_TREE ]]  || _fleet_fatal "bad tree '$t'"
     [[ "$d" =~ $FLEET_RE_IDENT ]] || _fleet_fatal "bad dest '$d'"
     [[ "$s" == "$d" ]] && _fleet_fatal "source == dest for tree '$t'"
-    # attribute tail: key=value words after the 3 positional columns
+    # no attribute tails on job rows today: via= is reserved for R, and
+    # the one tail that briefly existed (snaps=) moved to [source-quota]
+    # -- per-(src,tree) facts duplicated across a tree's dest rows were
+    # a hand-edit consistency chore (owner, 2026-08-04)
     shift 3
-    local kv snaps=""
+    local kv
     for kv in "$@"; do
         case "$kv" in
             via=*)   _fleet_fatal "via= is reserved for the relay phase (R); not supported yet" ;;
-            snaps=*) snaps="${kv#*=}"
-                     [[ "$snaps" =~ $FLEET_RE_SNAPS ]] \
-                         || _fleet_fatal "bad snaps budget '$snaps' (want <N><K|M|G|T|P>, <N>%, or off)"
-                     _fleet_snaps_pct_ok "$snaps" ;;
-            *)       _fleet_fatal "unknown job attribute '$kv' (job rows are 'source tree dest [key=value ...]')" ;;
+            snaps=*) _fleet_fatal "per-tree budgets live in [source-quota] rows ('source tree value'), not on job rows" ;;
+            *)       _fleet_fatal "unknown job attribute '$kv' (job rows are 'source tree dest')" ;;
         esac
     done
-    # snaps= is a per-(source,tree) fact carried on per-(source,tree,dest)
-    # rows: every row of the same (source,tree) must agree -- including
-    # agreeing on absence. Silent last-wins would let a hand-edit change
-    # one row and quietly not mean what it says.
-    local skey="$s|$t"
-    if [[ -n "${_fleet_snaps_seen[$skey]:-}" ]]; then
-        [[ "${fleet_job_snaps[$skey]:-}" == "$snaps" ]] \
-            || _fleet_fatal "snaps= disagrees across rows of '$s $t' ('${fleet_job_snaps[$skey]:-<none>}' vs '${snaps:-<none>}')"
-    else
-        _fleet_snaps_seen[$skey]=1
-        [[ -n "$snaps" ]] && fleet_job_snaps[$skey]="$snaps"
-    fi
     local key="$s|$t|$d"
     [[ -n "${_fleet_job_seen[$key]:-}" ]] && _fleet_fatal "duplicate job: $s $t $d"
     _fleet_job_seen[$key]=1
     fleet_job_src+=( "$s" )
     fleet_job_tree+=( "$t" )
     fleet_job_dest+=( "$d" )
+}
+
+# [source-quota] rows: 'source tree value', columns like [jobs], one row
+# per (source,tree). Values as in FLEET_RE_SNAPS; off = explicitly no
+# budget (beats the [options] default). Cross-checked against the job
+# rows at EOF: a quota for a (source,tree) no job names is a typo and
+# dies loudly.
+_fleet_srcquota_line() {
+    (( $# == 3 )) || _fleet_fatal "source-quota rows are 'source tree value' (exactly 3 columns)"
+    local s="$1" t="$2" v="$3"
+    [[ "$s" =~ $FLEET_RE_IDENT ]] || _fleet_fatal "bad source '$s'"
+    [[ "$t" =~ $FLEET_RE_TREE ]]  || _fleet_fatal "bad tree '$t'"
+    [[ "$v" =~ $FLEET_RE_SNAPS ]] \
+        || _fleet_fatal "bad source-quota '$v' (want <N><K|M|G|T|P>, <N>%, or off)"
+    _fleet_snaps_pct_ok "$v"
+    local key="$s|$t"
+    [[ -n "${_fleet_snaps_seen[$key]:-}" ]] && _fleet_fatal "duplicate source-quota for '$s $t'"
+    _fleet_snaps_seen[$key]=1
+    fleet_job_snaps[$key]="$v"
 }
 
 fleet_parse() {
@@ -194,17 +202,18 @@ fleet_parse() {
         if [[ $line =~ ^\[(.*)\]$ ]]; then
             section="${BASH_REMATCH[1]}"
             case "$section" in
-                options|retention|hosts|jobs) ;;
+                options|retention|hosts|jobs|source-quota) ;;
                 *) _fleet_fatal "unknown section [$section]" ;;
             esac
             continue
         fi
         case "$section" in
-            "")        _fleet_fatal "content before the first section" ;;
-            options)   _fleet_opt_line  $line ;;   # unquoted: word-split the columns
-            retention) _fleet_ret_line  $line ;;
-            hosts)     _fleet_host_line $line ;;
-            jobs)      _fleet_job_line  $line ;;
+            "")           _fleet_fatal "content before the first section" ;;
+            options)      _fleet_opt_line      $line ;;   # unquoted: word-split the columns
+            retention)    _fleet_ret_line      $line ;;
+            hosts)        _fleet_host_line     $line ;;
+            jobs)         _fleet_job_line      $line ;;
+            source-quota) _fleet_srcquota_line $line ;;
         esac
     done < "$cfg"
 
@@ -217,6 +226,7 @@ fleet_parse() {
     [[ -z "$fleet_opt_gc_destroy" ]] && fleet_opt_gc_destroy="off"
     (( ${#fleet_job_src[@]} > 0 )) || _fleet_fatal "no [jobs] defined"
     local i d
+    declare -A _fleet_st=()
     for (( i = 0; i < ${#fleet_job_src[@]}; i++ )); do
         d="${fleet_job_dest[i]}"
         # Sources without a [hosts] entry are legal (vanilla senders), so a
@@ -224,6 +234,14 @@ fleet_parse() {
         # every dest must be declared with recv=.
         [[ -n "${fleet_host_recv[$d]:-}" ]] \
             || _fleet_fatal "dest '$d' has no recv= ([hosts] entry missing, or a typo in a job row)"
+        _fleet_st["${fleet_job_src[i]}|${fleet_job_tree[i]}"]=1
+    done
+    # a [source-quota] row for a (source,tree) no job names would silently
+    # apply to nothing -- that is a typo, and typos die at parse time
+    local k
+    for k in "${!fleet_job_snaps[@]}"; do
+        [[ -n "${_fleet_st[$k]:-}" ]] \
+            || _fleet_fatal "source-quota for '${k%%|*} ${k#*|}' matches no job row"
     done
     fleet_derive
 }
@@ -273,8 +291,8 @@ fleet_data() {
 }
 
 # fleet_snaps <src> <tree> -> effective sender snaps budget, "" when none.
-# Row-level snaps= beats the [options] snaps default; a stored "off"
-# (row or default) means explicitly no budget.
+# A [source-quota] row beats the [options] source-quota default; a stored
+# "off" (row or default) means explicitly no budget.
 fleet_snaps() {
     local v="${fleet_job_snaps[$1|$2]:-$fleet_opt_snaps}"
     if [[ "$v" == "off" ]]; then

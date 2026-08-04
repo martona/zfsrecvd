@@ -140,20 +140,24 @@ grep -q "gcd=on" <<<"$o" && ok "gc-destroy on parses" || bad "gc-destroy on: $o"
 o=$(bash -c "source '$FP'; fleet_parse '$FX/good.conf'; echo \"gcd=\$fleet_opt_gc_destroy\"" 2>&1)
 grep -q "gcd=off" <<<"$o" && ok "gc-destroy defaults off" || bad "gc-destroy default: $o"
 
-# ---- snaps= sender budgets (job-row tail + [options] default) ----------
+# ---- [source-quota]: sender snaps budgets, one row per (src,tree) ------
 cat > "$FX/snaps.conf" <<'EOF'
 [options]
-snaps 10%
+source-quota 10%
 
 [hosts]
 b recv=t/r
 c recv=t/r
 
 [jobs]
-zeus   rust/vm   b   snaps=1T
-zeus   rust/vm   c   snaps=1T
+zeus   rust/vm   b
+zeus   rust/vm   c
 odin   rpool     b
-cp4    scratch   b   snaps=off
+cp4    scratch   b
+
+[source-quota]
+zeus   rust/vm   1T
+cp4    scratch   off
 EOF
 o=$(bash -c "source '$FP'; fleet_parse '$FX/snaps.conf';
     echo \"opt=\$fleet_opt_snaps\";
@@ -161,46 +165,63 @@ o=$(bash -c "source '$FP'; fleet_parse '$FX/snaps.conf';
     echo \"jobs=\${#fleet_job_src[@]}\"" 2>&1)
 rc=$?
 [[ $rc -eq 0 ]] && ok "snaps.conf parses (rc=0)" || { bad "snaps.conf rc=$rc"; echo "$o"; }
-grep -q "opt=10%" <<<"$o" && ok "[options] snaps stored" || bad "opt snaps: $o"
-grep -q "row=\[1T\] def=\[10%\] off=\[\]" <<<"$o" && ok "fleet_snaps: row wins, default falls through, off empties" || bad "fleet_snaps: $o"
-grep -q "jobs=4" <<<"$o" && ok "tailed rows still count as jobs" || bad "tailed jobs: $o"
+grep -q "opt=10%" <<<"$o" && ok "[options] source-quota stored" || bad "opt source-quota: $o"
+grep -q "row=\[1T\] def=\[10%\] off=\[\]" <<<"$o" && ok "fleet_snaps: quota row wins, default falls through, off empties" || bad "fleet_snaps: $o"
+grep -q "jobs=4" <<<"$o" && ok "quota'd trees still count as jobs" || bad "quota jobs: $o"
 
-# no [options] default: absent rows have no budget at all
+# no [options] default: unmentioned trees have no budget at all
 printf '[hosts]\nb recv=t/r\n[jobs]\na t b\n' > "$FX/snapsnone.conf"
 o=$(bash -c "source '$FP'; fleet_parse '$FX/snapsnone.conf'; echo \"none=[\$(fleet_snaps a t)]\"" 2>&1)
 grep -q "none=\[\]" <<<"$o" && ok "no default, no row -> no budget" || bad "snaps none: $o"
 
-# snaps=off as the fleet default disables everywhere
-printf '[options]\nsnaps off\n[hosts]\nb recv=t/r\n[jobs]\na t b\n' > "$FX/snapsoffdef.conf"
+# source-quota off as the fleet default disables everywhere
+printf '[options]\nsource-quota off\n[hosts]\nb recv=t/r\n[jobs]\na t b\n' > "$FX/snapsoffdef.conf"
 o=$(bash -c "source '$FP'; fleet_parse '$FX/snapsoffdef.conf'; echo \"offdef=[\$(fleet_snaps a t)]\"" 2>&1)
-grep -q "offdef=\[\]" <<<"$o" && ok "snaps off default -> no budget" || bad "snaps off default: $o"
+grep -q "offdef=\[\]" <<<"$o" && ok "source-quota off default -> no budget" || bad "off default: $o"
 
 expect_fatal badsnapsval '[hosts]
 b recv=t/r
 [jobs]
-a tree b snaps=1000' 4 "bad snaps budget"
+a tree b
+[source-quota]
+a tree 1000' 6 "bad source-quota"
 
 expect_fatal badsnapspct '[hosts]
 b recv=t/r
 [jobs]
-a tree b snaps=250%' 4 "snaps percent must be 1-100"
+a tree b
+[source-quota]
+a tree 250%' 6 "snaps percent must be 1-100"
 
 expect_fatal badsnapsopt '[options]
-snaps lots' 2 "bad snaps budget"
+source-quota lots' 2 "bad source-quota"
 
-expect_fatal snapsdisagree '[hosts]
+expect_fatal quotadup '[hosts]
 b recv=t/r
-c recv=t/r
 [jobs]
-a tree b snaps=1T
-a tree c snaps=2T' 6 "snaps= disagrees"
+a tree b
+[source-quota]
+a tree 1T
+a tree 2T' 7 "duplicate source-quota"
 
-expect_fatal snapsabsent '[hosts]
+expect_fatal quotanojob '[hosts]
 b recv=t/r
-c recv=t/r
 [jobs]
-a tree b snaps=1T
-a tree c' 6 "snaps= disagrees"
+a tree b
+[source-quota]
+a typo 1T' EOF "matches no job row"
+
+expect_fatal quotacols '[hosts]
+b recv=t/r
+[jobs]
+a tree b
+[source-quota]
+atree 1T' 6 "exactly 3 columns"
+
+expect_fatal quotaonrow '[hosts]
+b recv=t/r
+[jobs]
+a tree b snaps=1T' 4 "live in .source-quota. rows"
 
 expect_fatal badjobattr '[hosts]
 b recv=t/r
