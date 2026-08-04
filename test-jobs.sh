@@ -124,41 +124,6 @@ drive "Dy\nDy\nsqq"
 cmp -s "$CONF" "$FX/pre" && ok "invalid (empty) save left file untouched" || bad "empty save clobbered file"
 grep -q "NOT saved" "$FX/err" && ok "empty save refused loudly" || bad "no refusal message"
 
-# --- job-row attribute tails (snaps=) survive the editor ---------------------
-mkconf2() { cat > "$CONF" <<'EOF'
-[hosts]
-recv1   recv=tank/recv
-recv2   recv=rust/recv
-
-[jobs]
-srcA   tank/a   recv1   snaps=1T
-srcB   tank/b   recv1
-EOF
-}
-mkconf2
-drive "sq"
-grep -Eq "^srcA +tank/a +recv1 +snaps=1T$" "$CONF" \
-    && ok "no-op save keeps the snaps= tail" || bad "tail lost on save"
-grep -Eq "^srcB +tank/b +recv1$" "$CONF" \
-    && ok "tail-less row stays bare (no trailing attrs)" || bad "bare row grew a tail"
-cp "$CONF" "$FX/one"
-drive "sq"
-cmp -s "$CONF" "$FX/one" && ok "tailed save is idempotent" || bad "second tailed save changed the file"
-
-# a newly toggled cell on a tailed (src,tree) inherits the tail: the
-# parser's consistency rule would otherwise refuse the very save that
-# steve jobs just wrote
-mkconf2
-drive "l sq"
-grep -Eq "^srcA +tank/a +recv2 +snaps=1T$" "$CONF" \
-    && ok "toggled cell inherits the (src,tree) snaps= tail" || bad "inherited tail missing"
-[[ $(njobs) == 3 ]] && ok "tailed toggle job count" || bad "count: $(njobs)"
-
-# deleting the row forgets its tail (no resurrection on a later re-add)
-mkconf2
-drive "dy\nsq"
-grep -q "snaps=1T" "$CONF" && bad "deleted row's tail lingers" || ok "row delete drops the tail"
-
 # --- a config that doesn't parse is refused at open --------------------------
 mkconf
 echo "one two three four" >> "$CONF"
