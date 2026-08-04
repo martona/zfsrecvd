@@ -325,21 +325,25 @@ grep -q "0 failed" /tmp/fleet11.log && ok "T17 surviving jobs clean" || { bad "T
 grep -qF '"dst":"vmrecv2","state":"cadence"' "$RJ" && ok "T17 cadence state in jsonl" || { bad "T17 jsonl"; tail -n 3 "$RJ"; }
 /usr/local/lib/stevedore/stevedore-report.sh 2>/dev/null | grep -q "1 within cadence" && ok "T17 report shows the skip" || { bad "T17 report"; /usr/local/lib/stevedore/stevedore-report.sh 2>&1 | head -n 8; }
 
-# PARTIAL skip: a cadence destination with one fresh and one stale
-# tuple stays in the run, and the console NAMES the stale survivors --
-# "N within window; skipping" followed by provisioning reads as a
-# cadence bug otherwise (bit the owner on the real fleet: a fresh
-# steve-jobs row kept waking EC2 with no explanation on screen)
+# PARTIAL skip -> RIDE-ALONG (divergence guard, owner 2026-08-04): a
+# cadence destination with one fresh and one stale tuple stays in the
+# run; the console NAMES the stale survivor, and the fresh tuple RIDES
+# ALONG instead of skipping -- the destination is up anyway, and
+# leaving the fresh job behind would split one cadence into two
+# alternating wakes (the intermittent-source pattern from the real
+# fleet). No cadence jsonl line for the ridden job: it just runs.
 sudo zfs create -p ztest/src2/x 2>/dev/null
 cp ~/fleet-cad.conf ~/fleet-cadp.conf
 echo "$CN   ztest/src2   vmrecv2" >> ~/fleet-cadp.conf
 /usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-cadp.conf >/tmp/fleet20.log 2>&1
 rc=$?
-check "T17 partial-skip rc=0" test "$rc" -eq 0
-grep -q "cadence: \[vmrecv2\] 1 job(s) within 24h" /tmp/fleet20.log && ok "T17 partial: fresh tuple skipped" || { bad "T17 partial skip"; grep -a "cadence" /tmp/fleet20.log; }
+check "T17 partial rc=0" test "$rc" -eq 0
 grep -q "cadence: \[vmrecv2\] still runs -- no recent success for: $CN ztest/src2" /tmp/fleet20.log && ok "T17 partial: stale survivor named" || { bad "T17 survivor"; grep -a "cadence" /tmp/fleet20.log; }
+grep -q "cadence: \[vmrecv2\] 1 within-window job(s) ride along" /tmp/fleet20.log && ok "T17 partial: fresh tuple rides along" || { bad "T17 ride"; grep -a "cadence" /tmp/fleet20.log; }
+grep -q "job(s) within 24h" /tmp/fleet20.log && bad "T17 partial: misleading skip line printed" || ok "T17 partial: no misleading skip line"
 grep -q "starting run listener on \[vmrecv2\]" /tmp/fleet20.log && ok "T17 partial: destination participates" || { bad "T17 partial participate"; tail -n 20 /tmp/fleet20.log; }
 grep -q "0 failed" /tmp/fleet20.log && ok "T17 partial run clean" || { bad "T17 partial failures"; tail -n 20 /tmp/fleet20.log; }
+tail -n 6 "$RJ" | grep -qF "\"src\":\"$CN\",\"tree\":\"ztest/src\",\"dst\":\"vmrecv2\",\"state\":\"done\",\"rc\":\"0\"" && ok "T17 partial: ridden job ran (jsonl)" || { bad "T17 ride jsonl"; tail -n 6 "$RJ"; }
 
 # --force-ec2 overrides the window
 /usr/local/lib/stevedore/stevedore-fleetrun.sh --force-ec2 -c ~/fleet-cad.conf >/tmp/fleet12.log 2>&1
@@ -512,11 +516,11 @@ last_min=$(date +%H%M)
 for _ in $(seq 1 130); do [ "$(date +%H%M)" != "$last_min" ] && break; sleep 1; done
 { cat ~/fleet-test.conf; printf '\n[source-quota]\n%s   ztest/src   3M\n' "$CN"; } > ~/fleet-snaps.conf
 n_before=$(sudo zfs list -H -t snapshot -d 1 -o name ztest/src | grep -c stevedore-)
-/usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-snaps.conf >/tmp/fleet20.log 2>&1
+/usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-snaps.conf >/tmp/fleet21.log 2>&1
 rc=$?
 check "T21 budget run rc=0" test "$rc" -eq 0
-grep -q "(snaps budget)" /tmp/fleet20.log && ok "T21 budget prune fired" || { bad "T21 no budget prune"; grep -a "snaps" /tmp/fleet20.log | head -5; }
-grep -q "snaps budget on ztest/src:" /tmp/fleet20.log && ok "T21 budget summary line" || { bad "T21 summary"; grep -a "budget" /tmp/fleet20.log | head -5; }
+grep -q "(snaps budget)" /tmp/fleet21.log && ok "T21 budget prune fired" || { bad "T21 no budget prune"; grep -a "snaps" /tmp/fleet21.log | head -5; }
+grep -q "snaps budget on ztest/src:" /tmp/fleet21.log && ok "T21 budget summary line" || { bad "T21 summary"; grep -a "budget" /tmp/fleet21.log | head -5; }
 n_after=$(sudo zfs list -H -t snapshot -d 1 -o name ztest/src | grep -c stevedore-)
 check "T21 newest snapshot survived (got $n_after)" test "$n_after" -ge 1
 tail -n 1 "$RJ" | grep -q '"snapfp":' && ok "T21 footprint in the run record" || { bad "T21 jsonl snapfp"; tail -n 1 "$RJ"; }
@@ -541,10 +545,32 @@ check "T21 floor kept exactly the newest (got $n_floor)" test "$n_floor" = "1"
 grep -q "^ztest/src .* floor$" /tmp/t21/snaps.report && ok "T21 ledger records floor" || { bad "T21 ledger"; cat /tmp/t21/snaps.report 2>/dev/null; }
 sudo rm -rf /tmp/t21 ~/fleet-snaps.conf
 
+echo "=== T22: dead receiver under haproxy: dropped, named, rest run ==="
+# deadrecv refuses ssh instantly (T9 precedent). Receivers provision
+# FIRST now, so no sender bundle ever carries its backend -- the
+# sender's haproxy starts with live frontends only (an unresolvable
+# backend used to be a fatal haproxy config error that took every
+# sender down with one dead receiver: cp4's rebuild, 2026-08-04).
+# Dropped jobs land in the jsonl as state "dropped" and render in the
+# report's FAIL list; the run is degraded (rc 1), never dead.
+sed '/^port/a transport   haproxy' ~/fleet-test.conf > ~/fleet-deadrecv.conf
+sed -i '/^vmrecv2/a deadrecv  ssh=nosuchuser@localhost   data=localhost   recv=ztest/recv   bind=127.0.0.3' ~/fleet-deadrecv.conf
+printf '%s   ztest/src   deadrecv\n' "$CN" >> ~/fleet-deadrecv.conf
+/usr/local/lib/stevedore/stevedore-fleetrun.sh -c ~/fleet-deadrecv.conf >/tmp/fleet22.log 2>&1
+rc=$?
+check "T22 degraded run rc=1" test "$rc" -eq 1
+grep -q "provisioning \[deadrecv\] failed; dropping its jobs" /tmp/fleet22.log && ok "T22 drop announced" || { bad "T22 announce"; grep -a deadrecv /tmp/fleet22.log | head -5; }
+grep -q "starting haproxy on \[$CN\]" /tmp/fleet22.log && ok "T22 sender haproxy started" || { bad "T22 sender ha"; grep -a haproxy /tmp/fleet22.log | head -8; }
+grep -q "ERROR: haproxy on \[$CN\] failed" /tmp/fleet22.log && bad "T22 sender haproxy died of the dead backend" || ok "T22 sender haproxy survived"
+grep -q "0 failed" /tmp/fleet22.log && ok "T22 surviving jobs clean" || { bad "T22 failures"; tail -n 25 /tmp/fleet22.log; }
+grep -qF '"dst":"deadrecv","state":"dropped","rc":"1","why":"receiver [deadrecv] failed provisioning"' "$RJ" && ok "T22 drop in jsonl" || { bad "T22 jsonl"; tail -n 5 "$RJ"; }
+/usr/local/lib/stevedore/stevedore-report.sh 2>/dev/null | grep -q "FAIL.*\[deadrecv\].*failed provisioning" && ok "T22 report names the drop" || { bad "T22 report"; /usr/local/lib/stevedore/stevedore-report.sh 2>&1 | head -n 10; }
+rm -f ~/fleet-deadrecv.conf
+
 echo
 echo "=== RESULT: $PASS passed, $FAIL failed ==="
 if [ "$FAIL" -gt 0 ]; then
-    for f in /tmp/fleet1.log /tmp/fleet2.log /tmp/fleet3.log /tmp/fleet4.log /tmp/fleet5.log /tmp/fleet6.log /tmp/fleet7.log /tmp/fleet8.log /tmp/fleet9.log /tmp/fleet10.log /tmp/fleet11.log /tmp/fleet12.log /tmp/fleet13.log /tmp/fleet14.log /tmp/fleet15.log /tmp/fleet16.log /tmp/fleet17.log /tmp/fleet18.log /tmp/fleet19.log /tmp/fleet20.log; do
+    for f in /tmp/fleet1.log /tmp/fleet2.log /tmp/fleet3.log /tmp/fleet4.log /tmp/fleet5.log /tmp/fleet6.log /tmp/fleet7.log /tmp/fleet8.log /tmp/fleet9.log /tmp/fleet10.log /tmp/fleet11.log /tmp/fleet12.log /tmp/fleet13.log /tmp/fleet14.log /tmp/fleet15.log /tmp/fleet16.log /tmp/fleet17.log /tmp/fleet18.log /tmp/fleet19.log /tmp/fleet20.log /tmp/fleet21.log /tmp/fleet22.log; do
         [ -f "$f" ] && { echo "--- $f tail ---"; tail -n 25 "$f"; }
     done
     for u in stevedore-run-vmrecv stevedore-run-vmrecv2 stevedore-ha-vmrecv stevedore-ha-vmrecv2; do

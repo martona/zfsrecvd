@@ -115,6 +115,22 @@ append_cadence_jobs() {
     done >> "$report_dir/runs.jsonl" 2>/dev/null || true
 }
 
+# provisioning-dropped jobs, state "dropped", rc 1: the report renders
+# them in the FAIL list with the failed host named -- a receiver down
+# for a rebuild must not make its jobs silently vanish from the record
+drop_src=(); drop_tree=(); drop_dest=(); drop_why=()
+append_dropped_jobs() {
+    local i ts
+    if (( ${#drop_src[@]} == 0 )) || [[ -z "$report_dir" ]]; then
+        return 0
+    fi
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    for (( i = 0; i < ${#drop_src[@]}; i++ )); do
+        printf '{"ts":"%s","snap":"","src":"%s","tree":"%s","dst":"%s","state":"dropped","rc":"1","why":"%s","failed_ds":"","secs":0}\n' \
+            "$ts" "${drop_src[i]}" "${drop_tree[i]}" "${drop_dest[i]}" "${drop_why[i]}"
+    done >> "$report_dir/runs.jsonl" 2>/dev/null || true
+}
+
 #
 # ---------- 0. cadence filter (PROTOCOL.md §22) ------------------------------
 #
@@ -237,6 +253,7 @@ if [[ -n "$has_cadence" && -z "$force_ec2" ]]; then
     done
     _pre_recv=( "${fleet_receivers[@]}" )
     _keep_src=(); _keep_tree=(); _keep_dest=()
+    declare -A _stale_list=()
     for (( i = 0; i < ${#fleet_job_src[@]}; i++ )); do
         d="${fleet_job_dest[i]}"
         s="${fleet_job_src[i]}"
@@ -257,6 +274,10 @@ if [[ -n "$has_cadence" && -z "$force_ec2" ]]; then
                 drop=1
                 cad_ok+=( "-" )
                 cad_why+=( "source unreachable; cadence window not consulted" )
+            else
+                # a stale (or never-seen) tuple surviving toward a
+                # cadenced dest is what forces its wake; named below
+                _stale_list[$d]="${_stale_list[$d]:-}${_stale_list[$d]:+, }$s ${fleet_job_tree[i]}"
             fi
             if [[ -n "$drop" ]]; then
                 cad_src+=( "$s" )
@@ -279,26 +300,56 @@ if [[ -n "$has_cadence" && -z "$force_ec2" ]]; then
         for h in "${fleet_receivers[@]}"; do
             _post_recv[$h]=1
         done
-        for h in "${_pre_recv[@]}"; do
-            if [[ -n "${cad_n[$h]:-}" ]]; then
-                echo "cadence: [$h] ${cad_n[$h]} job(s) within ${fleet_host_cadence[$h]} (newest ok ${cad_newest[$h]}); skipping" >&2
+        # Divergence guard (owner 2026-08-04): a destination that runs
+        # anyway -- a stale tuple kept it in -- takes its within-window
+        # jobs along instead of leaving them for a second wake of their
+        # own. An intermittently-online source otherwise splits one 24h
+        # cadence into two alternating wakes: its solo catch-up run,
+        # then everyone else's run it just missed. Only "last ok" skips
+        # ride along; unreachable-source and --skip-ec2 drops stay
+        # dropped. A destination with NO stale tuple still skips whole
+        # (EC2 stays asleep) exactly as before.
+        declare -A ride_n=()
+        _kc_src=(); _kc_tree=(); _kc_dest=(); _kc_ok=(); _kc_why=()
+        for (( i = 0; i < ${#cad_src[@]}; i++ )); do
+            if [[ "${cad_why[i]}" == "last ok"* && -n "${_post_recv[${cad_dest[i]}]:-}" ]]; then
+                fleet_job_src+=( "${cad_src[i]}" )
+                fleet_job_tree+=( "${cad_tree[i]}" )
+                fleet_job_dest+=( "${cad_dest[i]}" )
+                ride_n[${cad_dest[i]}]=$(( ${ride_n[${cad_dest[i]}]:-0} + 1 ))
+            else
+                _kc_src+=( "${cad_src[i]}" )
+                _kc_tree+=( "${cad_tree[i]}" )
+                _kc_dest+=( "${cad_dest[i]}" )
+                _kc_ok+=( "${cad_ok[i]}" )
+                _kc_why+=( "${cad_why[i]}" )
             fi
-            if [[ -n "${cad_n[$h]:-}" && -z "${_post_recv[$h]:-}" && -n "${fleet_host_ec2[$h]:-}" ]]; then
-                echo "cadence: [$h] EC2 wake skipped" >&2
+        done
+        if (( ${#ride_n[@]} > 0 )); then
+            cad_src=( "${_kc_src[@]}" )
+            cad_tree=( "${_kc_tree[@]}" )
+            cad_dest=( "${_kc_dest[@]}" )
+            cad_ok=( "${_kc_ok[@]}" )
+            cad_why=( "${_kc_why[@]}" )
+            # a ride-along source may have had nothing else in the run
+            fleet_derive
+        fi
+        for h in "${_pre_recv[@]}"; do
+            if [[ -n "${cad_n[$h]:-}" && -z "${_post_recv[$h]:-}" ]]; then
+                echo "cadence: [$h] ${cad_n[$h]} job(s) within ${fleet_host_cadence[$h]} (newest ok ${cad_newest[$h]}); skipping" >&2
+                if [[ -n "${fleet_host_ec2[$h]:-}" ]]; then
+                    echo "cadence: [$h] EC2 wake skipped" >&2
+                fi
             fi
             if [[ -n "${cad_n[$h]:-}" && -n "${_post_recv[$h]:-}" ]]; then
-                # PARTIAL skip: name what kept the destination in the run
-                # -- "N within window; skipping" followed by a wake reads
+                # PARTIAL: name what kept the destination in the run --
+                # "N within window; skipping" followed by a wake reads
                 # as a cadence bug otherwise (owner hit exactly that
-                # reading; the survivors were a fresh steve-jobs row and
-                # an offline-during-last-window source catching up)
-                _stale=""
-                for (( _ci = 0; _ci < ${#fleet_job_src[@]}; _ci++ )); do
-                    if [[ "${fleet_job_dest[_ci]}" == "$h" ]]; then
-                        _stale+="${_stale:+, }${fleet_job_src[_ci]} ${fleet_job_tree[_ci]}"
-                    fi
-                done
-                echo "cadence: [$h] still runs -- no recent success for: $_stale" >&2
+                # reading) -- and say where the within-window jobs went
+                echo "cadence: [$h] still runs -- no recent success for: ${_stale_list[$h]:-}" >&2
+                if [[ -n "${ride_n[$h]:-}" ]]; then
+                    echo "cadence: [$h] ${ride_n[$h]} within-window job(s) ride along (destination is up anyway)" >&2
+                fi
             fi
         done
     fi
@@ -527,13 +578,18 @@ gen_run_conf() {   # $1 = host identity -> writes $rundir/bundle-$1/run.conf
         local i d
         declare -A tseen=()
         if [[ "$fleet_opt_transport" == "haproxy" ]] && is_source "$id"; then
-            # dial name -> loopback port of this sender's haproxy bridge
+            # dial name -> loopback port of this sender's haproxy bridge.
+            # prov_failed dests are omitted (receivers provision first,
+            # so their verdicts are known here); their jobs are dropped
+            # at orchestrator-conf time anyway
             printf '[tunnel]\n'
             for (( i = 0; i < ${#fleet_job_src[@]}; i++ )); do
                 if [[ "${fleet_job_src[i]}" == "$id" && -z "${tseen[${fleet_job_dest[i]}]:-}" ]]; then
                     d="${fleet_job_dest[i]}"
                     tseen[$d]=1
-                    printf '%s %s\n' "$(fleet_data "$d")" "${recv_tun[$d]}"
+                    if [[ -z "${prov_failed[$d]:-}" ]]; then
+                        printf '%s %s\n' "$(fleet_data "$d")" "${recv_tun[$d]}"
+                    fi
                 fi
             done
         fi
@@ -667,7 +723,13 @@ gen_haproxy_cfg() {   # $1 = identity -> writes $rundir/bundle-$1/haproxy.cfg
     declare -A hseen=()
     {
         printf 'global\n    maxconn 64\n    tune.bufsize 1048576\n    tune.maxrewrite 16384\n\n'
-        printf 'defaults\n    mode tcp\n    timeout connect 5s\n    timeout client 1h\n    timeout server 1h\n\n'
+        # init-addr: a backend whose dial does not resolve at startup is
+        # a FATAL config error by default -- one dead receiver would kill
+        # this haproxy outright. last,libc,none = try to resolve, else
+        # start anyway with the server marked down. Dead dests are also
+        # filtered out below; this is the belt for a dial that dies
+        # between provisioning and startup.
+        printf 'defaults\n    mode tcp\n    default-server init-addr last,libc,none\n    timeout connect 5s\n    timeout client 1h\n    timeout server 1h\n\n'
         if is_receiver "$id"; then
             printf 'frontend tls_in\n'
             printf '    bind %s:%s ssl crt %s/haproxy.pem ca-file %s/ca.pem verify required\n' \
@@ -681,6 +743,9 @@ gen_haproxy_cfg() {   # $1 = identity -> writes $rundir/bundle-$1/haproxy.cfg
                 if [[ "${fleet_job_src[i]}" == "$id" && -z "${hseen[${fleet_job_dest[i]}]:-}" ]]; then
                     d="${fleet_job_dest[i]}"
                     hseen[$d]=1
+                    if [[ -n "${prov_failed[$d]:-}" ]]; then
+                        continue
+                    fi
                     printf 'frontend plain_%s\n    bind 127.0.0.1:%s\n    default_backend tun_%s\n\n' \
                         "$d" "${recv_tun[$d]}" "$d"
                     printf 'backend tun_%s\n    server receiver %s:%s ssl crt %s/haproxy.pem ca-file %s/ca.pem verify required\n\n' \
@@ -701,9 +766,12 @@ start_haproxy() {   # $1 = participant identity
     if is_receiver "$id"; then
         pat="${fleet_host_bind[$id]:-0.0.0.0}:$fleet_opt_port "
     else
+        # first LIVE destination's tunnel port: prov_failed dests have no
+        # frontend in this sender's cfg (the caller skips the host when
+        # none are left)
         pat=""
         for (( i = 0; i < ${#fleet_job_src[@]}; i++ )); do
-            if [[ "${fleet_job_src[i]}" == "$id" ]]; then
+            if [[ "${fleet_job_src[i]}" == "$id" && -z "${prov_failed[${fleet_job_dest[i]}]:-}" ]]; then
                 pat="127.0.0.1:${recv_tun[${fleet_job_dest[i]}]} "
                 break
             fi
@@ -715,7 +783,23 @@ start_haproxy() {   # $1 = participant identity
     ha_started+=( "$id" )
 }
 
-for h in "${fleet_participants[@]}"; do
+# Receivers provision FIRST: their verdicts must be known before any
+# sender bundle generates, so a dead receiver's dial never appears in a
+# sender's haproxy backends or [tunnel] list. (cp4 down for a rebuild
+# once took every sender with it: sender haproxy.cfgs still carried its
+# backend, an unresolvable backend hostname is a fatal haproxy config
+# error, every sender's haproxy died at start, every sender went
+# prov_failed -- 2026-08-04.)
+for h in "${fleet_receivers[@]}"; do
+    if ! provision_host "$h"; then
+        prov_failed[$h]=1
+        echo "ERROR: provisioning [$h] failed; dropping its jobs from this run" >&2
+    fi
+done
+for h in "${fleet_sources[@]}"; do
+    if is_receiver "$h"; then
+        continue
+    fi
     if ! provision_host "$h"; then
         prov_failed[$h]=1
         echo "ERROR: provisioning [$h] failed; dropping its jobs from this run" >&2
@@ -757,6 +841,19 @@ if [[ "$fleet_opt_transport" == "haproxy" ]]; then
         if [[ -n "${prov_failed[$h]:-}" ]] || is_receiver "$h"; then
             continue
         fi
+        # a sender whose every destination failed provisioning has no
+        # frontends to bind and no jobs left; starting nothing is fine
+        _live=""
+        for (( i = 0; i < ${#fleet_job_src[@]}; i++ )); do
+            if [[ "${fleet_job_src[i]}" == "$h" && -z "${prov_failed[${fleet_job_dest[i]}]:-}" ]]; then
+                _live=1
+                break
+            fi
+        done
+        if [[ -z "$_live" ]]; then
+            echo "haproxy on [$h] not started (no live destinations remain)" >&2
+            continue
+        fi
         if ! start_haproxy "$h"; then
             prov_failed[$h]=1
             echo "ERROR: haproxy on [$h] failed; dropping its jobs from this run" >&2
@@ -773,9 +870,18 @@ runnable=0
     printf '[orchestrator-workers]\n%s\n' "$fleet_opt_workers"
     printf '[orchestrator-jobs]\n'
     # <source-id> <user@host> <run.conf> <tree> <dest-id> <dial>
-    # jobs touching a host that failed provisioning are dropped here
+    # jobs touching a host that failed provisioning are dropped here,
+    # collected for the ledger (state "dropped")
     for (( i = 0; i < ${#fleet_job_src[@]}; i++ )); do
         if [[ -n "${prov_failed[${fleet_job_src[i]}]:-}" || -n "${prov_failed[${fleet_job_dest[i]}]:-}" ]]; then
+            drop_src+=( "${fleet_job_src[i]}" )
+            drop_tree+=( "${fleet_job_tree[i]}" )
+            drop_dest+=( "${fleet_job_dest[i]}" )
+            if [[ -n "${prov_failed[${fleet_job_src[i]}]:-}" ]]; then
+                drop_why+=( "source [${fleet_job_src[i]}] failed provisioning" )
+            else
+                drop_why+=( "receiver [${fleet_job_dest[i]}] failed provisioning" )
+            fi
             continue
         fi
         runnable=$(( runnable + 1 ))
@@ -791,6 +897,16 @@ runnable=0
 
 if (( runnable == 0 )); then
     echo "ERROR: no runnable jobs remain after provisioning failures" >&2
+    # the drops still reach the ledger, with a bare run record so
+    # report.sh's positional grouping never dangles
+    report_dir_resolve
+    if [[ -n "$report_dir" ]]; then
+        append_cadence_jobs
+        append_dropped_jobs
+        printf '{"ts":"%s","kind":"run","run":"%s","rc":1,"recv":[],"src":[],"gc":[]}\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$run_id" \
+            >> "$report_dir/runs.jsonl" 2>/dev/null || true
+    fi
     exit 1
 fi
 
@@ -929,10 +1045,11 @@ for h in "${fleet_sources[@]}"; do
     unset sseen
 done
 
-if [[ -n "$report_json" || ${#cad_src[@]} -gt 0 ]]; then
+if [[ -n "$report_json" || ${#cad_src[@]} -gt 0 || ${#drop_src[@]} -gt 0 ]]; then
     report_dir_resolve
     if [[ -n "$report_dir" ]]; then
         append_cadence_jobs
+        append_dropped_jobs
         printf '{"ts":"%s","kind":"run","run":"%s","rc":%s,"recv":[%s],"src":[%s],"gc":[%s]}\n' \
             "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$run_id" "$orch_rc" "$report_json" "$src_json" "$gc_json" \
             >> "$report_dir/runs.jsonl" 2>/dev/null || true
