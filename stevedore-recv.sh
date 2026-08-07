@@ -220,7 +220,10 @@ under_renamed() {
 # (collision gets a numeric suffix). Any pending partial recv is discarded
 # first -- its token references the old lineage and could never be
 # satisfied by the newcomer anyway. The renamed subtree keeps its stamps
-# and ages into ordinary orphan GC (PROTOCOL.md §22).
+# AND gets its orphan clocks started right here (PROTOCOL.md §30): a
+# renamed TREE ROOT lands outside every future session's manifest scope,
+# where stamp_absent can never reach it -- unclocked, it would sit
+# invisible and immortal (the cp4-reinstall find, 2026-08-06).
 rename_aside() {   # $1 = source-relative ds; returns nonzero on failure
     local src="${dest_base}/$1"
     local tgt="${src}.gone-$(date -u +%Y%m%d)" n=1
@@ -229,6 +232,27 @@ rename_aside() {   # $1 = source-relative ds; returns nonzero on failure
         n=$(( n + 1 ))
     done
     zfs recv -A "$src" >/dev/null 2>&1 || true
+    # Clock the doomed subtree BEFORE the rename -- the order is the
+    # whole integrity story (owner design): interrupted before the
+    # rename, the stamps sit inside the session tree where the next
+    # manifest diff clears them (reappearance is the all-clear);
+    # interrupted after, the tree left session scope already clocked.
+    # Every dataset gets its own stamp (readers filter inherited values,
+    # and the -r destroy pass needs each descendant eligible); a dataset
+    # already carrying a clock keeps it -- overwriting would reset aged
+    # grace time.
+    local now d
+    declare -A _clocked=()
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    while IFS= read -r d; do
+        _clocked[$d]=1
+    done < <(zfs get -H -r -s local,received -t filesystem,volume \
+        -o name stevedore:orphan-since "$src" 2>/dev/null || true)
+    while IFS= read -r d; do
+        [[ -n "${_clocked[$d]:-}" ]] && continue
+        zfs set "stevedore:orphan-since=$now" "$d" 2>/dev/null \
+            || log "WARNING: could not clock $d ahead of rename-aside"
+    done < <(zfs list -H -r -t filesystem,volume -o name "$src" 2>/dev/null || true)
     if zfs rename "$src" "$tgt" 2>/dev/null; then
         renamed_aside[$1]=1
         log "renamed aside: $src -> $tgt (no shared lineage with the source's '$1')"

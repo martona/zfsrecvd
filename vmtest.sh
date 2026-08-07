@@ -371,6 +371,40 @@ grep -q "WIRE-BYTES:" /tmp/t17.log && ok "T17 epilogue intact (no silent truncat
 pkill -f "TCP-LISTEN:25299" 2>/dev/null
 sudo zfs destroy -r ztest/stallt 2>/dev/null
 
+echo "=== T18: whole-tree divergence: ROOT renamed aside, fully clocked ==="
+# the cp4-reinstall pattern (owner hit it live 2026-08-06): a renamed
+# tree ROOT lands OUTSIDE every future session's manifest scope, so the
+# ENDTREE clocking that covers child renames (T16) can never reach it.
+# rename_aside stamps every dataset of the subtree BEFORE the rename;
+# either interruption order self-heals (see recv.sh). The clocks must
+# be per-dataset and source=local (inherited values are nothing).
+DEST3="ztest/recv/$CN/ztest/src3"
+sudo zfs create -p ztest/src3/kid
+sudo zfs snapshot -r ztest/src3@r1
+sudo /usr/local/lib/stevedore/stevedore-sendtree.sh ztest/src3 localhost >/tmp/t18a.log 2>&1
+rc=$?
+check "T18 first send ok" test "$rc" -eq 0
+sudo zfs destroy -r ztest/src3
+sudo zfs create -p ztest/src3/kid
+sudo zfs snapshot -r ztest/src3@r2
+sudo /usr/local/lib/stevedore/stevedore-sendtree.sh ztest/src3 localhost >/tmp/t18b.log 2>&1
+rc=$?
+check "T18 reborn-tree send ok" test "$rc" -eq 0
+check "T18 newcomer arrived" sudo zfs list -H "$DEST3@r2"
+groot=$(sudo zfs list -H -o name -d 1 "ztest/recv/$CN/ztest" | grep "/src3\.gone-" | head -n 1)
+if [ -n "$groot" ]; then ok "T18 root renamed aside ($groot)"; else bad "T18 no .gone root"; fi
+nds=$(sudo zfs list -H -r -o name "$groot" 2>/dev/null | wc -l)
+nst=$(sudo zfs get -H -r -s local -o name stevedore:orphan-since "$groot" 2>/dev/null | wc -l)
+if [ "$nds" -ge 2 ] && [ "$nst" = "$nds" ]; then
+    ok "T18 every dataset clocked before the rename ($nst/$nds)"
+else
+    bad "T18 clocks missing ($nst/$nds stamped)"
+    sudo zfs get -r stevedore:orphan-since "$groot" 2>/dev/null | head -n 8
+fi
+gout=$(sudo env STEVEDORE_CONF=/etc/stevedore/stevedore.conf /usr/local/lib/stevedore/stevedore-gc.sh 2>&1)
+grep -q "GC-TRACK: $groot: orphan-since" <<<"$gout" && ok "T18 gc tracks the renamed root" || { bad "T18 gc root track"; grep src3 <<<"$gout" | head -n 5; }
+grep -q "GC-TRACK: $groot/kid: orphan-since" <<<"$gout" && ok "T18 gc tracks the renamed child" || { bad "T18 gc child track"; grep src3 <<<"$gout" | head -n 5; }
+
 echo
 echo "=== RESULT: $PASS passed, $FAIL failed ==="
 if [ "$FAIL" -gt 0 ]; then
