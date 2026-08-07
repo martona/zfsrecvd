@@ -49,6 +49,35 @@ function h(b,   s, a) {
     return s a "B"
 }
 function wmax(w, v) { return (length(v) > w ? length(v) : w) }
+# ISO UTC timestamp -> fractional day number (civil-days arithmetic; no
+# mktime, which mawk does not have)
+function dayn(ts,   y, m, d, era, yoe, doy, doe) {
+    y = substr(ts, 1, 4) + 0; m = substr(ts, 6, 2) + 0; d = substr(ts, 9, 2) + 0
+    y -= (m <= 2)
+    era = int(y / 400); yoe = y - era * 400
+    doy = int((153 * (m + (m > 2 ? -3 : 9)) + 2) / 5) + d - 1
+    doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
+    return era * 146097 + doe + substr(ts, 12, 2) / 24 + substr(ts, 15, 2) / 1440
+}
+# runway estimate for one receiver from the regression sums gathered
+# over the trend window. States: not enough data (-), avail shrinking
+# with the wall within a year (N days), shrinking slower than that or
+# flat (holding steady), avail growing (trending negative).
+function est(id,   n, den, slope, loss, days) {
+    n = en[id]
+    if (n < 2 || elast_t[id] - efirst_t[id] < 1) return "-"
+    den = n * exx[id] - ex[id] * ex[id]
+    if (den == 0) return "-"
+    slope = (n * exy[id] - ex[id] * ey[id]) / den
+    loss = -slope
+    if (loss > 0) {
+        days = elast[id] / loss
+        if (days > 365) return "holding steady"
+        return sprintf("%d days until pool is full", days)
+    }
+    if (slope > 0) return "trending negative"
+    return "holding steady"
+}
 /"kind":"run"/ {
     runs++
     rline[runs] = $0
@@ -85,11 +114,29 @@ END {
     if (wb > 0) printf ", %s on wire", h(wb)
     printf "\n"
 
+    # runway regression sums: (day, avail) per receiver over the same
+    # window the trend table uses. End-of-run samples are post-prune, so
+    # points are comparable; least-squares tolerates irregular manual-run
+    # spacing better than a per-run average would.
+    lo = (runs - NRUNS + 1 < 1 ? 1 : runs - NRUNS + 1)
+    for (x = lo; x <= runs; x++) {
+        line = rline[x]; t = dayn(g(rline[x], "ts"))
+        while (match(line, "\\{\"id\":\"[^\"]*\",\"before\":[^}]*\\}")) {
+            rec = substr(line, RSTART, RLENGTH); line = substr(line, RSTART + RLENGTH)
+            id = g(rec, "id"); v = g(rec, "avail") + 0
+            en[id]++; ex[id] += t; ey[id] += v; exx[id] += t * t; exy[id] += t * v
+            if (en[id] == 1) efirst_t[id] = t
+            elast_t[id] = t; elast[id] = v
+        }
+    }
+
     # receivers table: numbers right-aligned, widths from content.
     # "total" = the recv tree, absolute used (the record field "after"):
     # on a backup target the whole tree is history, base-vs-snaps is not
     # a distinction worth drawing (owner 2026-08-04); the field has been
     # in every record since reports v1, so old history renders it too.
+    # "estimate" = the runway forecast (window-derived, unlike the other
+    # columns, which are last-run) -- left-aligned tail, no padding.
     # NB comments here live inside a bash single-quoted string: no
     # apostrophes, ever.
     rn = 0; line = rline[r]
@@ -108,10 +155,10 @@ END {
             w1 = wmax(w1, rid[i]);  w0 = wmax(w0, rtot[i]);  w2 = wmax(w2, rnet[i])
             w3 = wmax(w3, rpr[i]);  w4 = wmax(w4, rav[i])
         }
-        fmt = "  %-" w1 "s  %" w0 "s  %" w2 "s  %" w3 "s  %" w4 "s\n"
+        fmt = "  %-" w1 "s  %" w0 "s  %" w2 "s  %" w3 "s  %" w4 "s  %s\n"
         print ""
-        printf fmt, "receiver", "total", "net", "pruned", "avail"
-        for (i = 1; i <= rn; i++) printf fmt, rid[i], rtot[i], rnet[i], rpr[i], rav[i]
+        printf fmt, "receiver", "total", "net", "pruned", "avail", "estimate"
+        for (i = 1; i <= rn; i++) printf fmt, rid[i], rtot[i], rnet[i], rpr[i], rav[i], est(rid[i])
     }
 
     # sources table: per-tree used / avail, plus the snaps-budget column

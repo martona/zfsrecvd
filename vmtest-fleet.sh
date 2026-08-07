@@ -258,7 +258,7 @@ grep -q "last run: run-" <<<"$rout" && ok "T12 report.sh renders" || { bad "T12 
 grep -q "track .*@keepme-manual" <<<"$rout" && bad "T12 track shown without --gc-debug" || ok "T12 track hidden by default"
 rdbg=$(/usr/local/lib/stevedore/stevedore-report.sh --gc-debug 2>/dev/null)
 grep -q "gc \[vmrecv\] track .*@keepme-manual: unknown-since" <<<"$rdbg" && ok "T12 --gc-debug surfaces the inventory" || { bad "T12 gc-debug"; grep "gc \[" <<<"$rdbg" | head -n 6; }
-grep -qE "^  receiver +total +net +pruned +avail$" <<<"$rout" && ok "T12 report.sh receiver table" || { bad "T12 recv table"; echo "$rout" | head -n 12; }
+grep -qE "^  receiver +total +net +pruned +avail  estimate$" <<<"$rout" && ok "T12 report.sh receiver table" || { bad "T12 recv table"; echo "$rout" | head -n 12; }
 grep -q "  gc \[" <<<"$rout" && ok "T12 report.sh gc section" || { bad "T12 gc section"; echo "$rout" | head -n 20; }
 grep -q "pruned: \[vmrecv\] .*@stevedore-2026-07-28-0800Z" /tmp/fleet8.log && ok "T12 SHOW_PRUNES names the destroyed" || { bad "T12 show prunes"; grep -a "pruned:" /tmp/fleet8.log | head -n 5; }
 

@@ -33,9 +33,22 @@ grep -q "FAIL  \[jup\] tank/a -> \[cp4\]" <<<"$out" && ok "failure drilldown lin
 grep -q "datasets: tank/a/vol tank/a/deep" <<<"$out" && ok "failed_ds surfaced" || bad "failed_ds: $out"
 # table rows are exact-line asserts: they prove the right-alignment, not
 # just the numbers
-grep -qx "  receiver  total   net  pruned   avail" <<<"$out" && ok "receiver table header (with total)" || bad "recv hdr: $out"
-grep -qx "  berg       4.0K  2.0K    512B    4.8M" <<<"$out" && ok "receiver row aligned (berg)" || bad "recv berg: $out"
-grep -qx "  cp4        800B    0B      0B  878.9K" <<<"$out" && ok "receiver row aligned (cp4)" || bad "recv cp4: $out"
+grep -qx "  receiver  total   net  pruned   avail  estimate" <<<"$out" && ok "receiver table header (total + estimate)" || bad "recv hdr: $out"
+grep -qx "  berg       4.0K  2.0K    512B    4.8M  holding steady" <<<"$out" && ok "receiver row aligned (berg, 499d runway = steady)" || bad "recv berg: $out"
+grep -qx "  cp4        800B    0B      0B  878.9K  holding steady" <<<"$out" && ok "receiver row aligned (cp4, flat = steady)" || bad "recv cp4: $out"
+
+# runway estimate states: filling pool gets a day count, freeing pool
+# trends negative, a single-sample newcomer gets a dash (regression
+# needs two points spanning at least a day)
+cat > "$FX/runway.jsonl" <<'EOF'
+{"ts":"2026-07-01T01:00:00Z","kind":"run","run":"r1","rc":0,"recv":[{"id":"filler","before":0,"after":100,"avail":365000,"pruned":0},{"id":"grower","before":0,"after":100,"avail":50000,"pruned":0}],"src":[]}
+{"ts":"2026-07-11T01:00:00Z","kind":"run","run":"r2","rc":0,"recv":[{"id":"filler","before":100,"after":200,"avail":315000,"pruned":0},{"id":"grower","before":100,"after":50,"avail":80000,"pruned":0}],"src":[]}
+{"ts":"2026-07-21T01:00:00Z","kind":"run","run":"r3","rc":0,"recv":[{"id":"filler","before":200,"after":300,"avail":265000,"pruned":0},{"id":"grower","before":50,"after":40,"avail":110000,"pruned":0},{"id":"newbie","before":0,"after":10,"avail":999,"pruned":0}],"src":[]}
+EOF
+out4=$(bash "$HERE/stevedore-report.sh" -f "$FX/runway.jsonl" 2>&1)
+grep -qE "  filler .* days until pool is full$" <<<"$out4" && ok "runway: filling pool gets a day count" || bad "runway fill: $out4"
+grep -qE "  grower .* trending negative$" <<<"$out4" && ok "runway: freeing pool trends negative" || bad "runway grow: $out4"
+grep -qE "  newbie .* -$" <<<"$out4" && ok "runway: single sample dashes" || bad "runway dash: $out4"
 grep -qx "  source  tree      used   avail" <<<"$out" && ok "source table header" || bad "src hdr: $out"
 grep -qx "  jup     tank/a  195.3K  683.6K" <<<"$out" && ok "source row aligned" || bad "src row: $out"
 grep -q "gc \[berg\] tank/recv/x/gone: ORPHAN CANDIDATE" <<<"$out" && ok "gc warning rendered" || bad "gc warn: $out"
